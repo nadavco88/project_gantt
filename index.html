@@ -79,10 +79,13 @@ textarea{resize:vertical;min-height:70px}
   padding:1px 6px;border-radius:10px;flex-shrink:0}
 .project-item .proj-progress{height:3px;background:var(--border);border-radius:2px;margin-top:6px;overflow:hidden}
 .project-item .proj-progress-fill{height:100%;border-radius:2px;transition:width .3s}
-.project-item .proj-delete{position:absolute;top:10px;right:8px;width:24px;height:24px;
+.project-item .proj-rename,.project-item .proj-delete{position:absolute;top:10px;width:24px;height:24px;
   border-radius:4px;display:flex;align-items:center;justify-content:center;opacity:0;
   transition:opacity .15s;color:var(--text-muted)}
-.project-item:hover .proj-delete{opacity:1}
+.project-item .proj-rename{right:34px}
+.project-item .proj-delete{right:8px}
+.project-item:hover .proj-rename,.project-item:hover .proj-delete{opacity:1}
+.project-item .proj-rename:hover{background:var(--accent-light);color:var(--accent)}
 .project-item .proj-delete:hover{background:var(--danger-light);color:var(--danger)}
 #sidebar-footer{padding:12px;border-top:1px solid var(--border)}
 #btn-new-project{width:100%;padding:9px;border-radius:8px;background:var(--accent);color:#fff;
@@ -124,6 +127,17 @@ textarea{resize:vertical;min-height:70px}
   cursor:pointer;font-size:13px;transition:background .15s;width:100%}
 .user-option:hover{background:var(--bg-hover)}
 .user-option.active{background:var(--accent-light);font-weight:500}
+.user-option{position:relative}
+.user-option .uo-name{flex:1}
+.user-option .user-delete{width:20px;height:20px;border-radius:4px;display:flex;align-items:center;
+  justify-content:center;opacity:0;transition:opacity .15s;flex-shrink:0;color:var(--text-muted)}
+.user-option:hover .user-delete{opacity:1}
+.user-option .user-delete:hover{background:var(--danger-light);color:var(--danger)}
+.user-dropdown-divider{height:1px;background:var(--border);margin:4px 0}
+.user-add-btn{display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:6px;
+  cursor:pointer;font-size:12px;font-weight:500;transition:background .15s;width:100%;
+  color:var(--accent)}
+.user-add-btn:hover{background:var(--accent-light)}
 
 /* Metrics */
 #metrics{display:flex;gap:12px;padding:14px 20px;flex-shrink:0}
@@ -409,6 +423,7 @@ input[type="file"]{display:none}
 /*
  * STATE SHAPE:
  * {
+ *   users: [{ name: string, color: string }],
  *   projects: [{
  *     id: string,
  *     name: string,
@@ -433,7 +448,7 @@ input[type="file"]{display:none}
 
 const SK = { data:'gantt_projects', theme:'gantt_theme', user:'gantt_active_user' };
 
-const USERS = [
+const DEFAULT_USERS = [
   {name:'Alice',color:'#4f6ef7'},
   {name:'Bob',color:'#f59e42'},
   {name:'Carol',color:'#36b37e'},
@@ -489,7 +504,7 @@ function relativeTime(ts){
   return fmtDate(new Date(ts));
 }
 
-function userObj(name){return USERS.find(u=>u.name===name)||USERS[0]}
+function userObj(name){return (state&&state.users||DEFAULT_USERS).find(u=>u.name===name)||(state&&state.users||DEFAULT_USERS)[0]}
 function avatarHTML(name,cls){
   const u=userObj(name);
   return `<span class="avatar ${cls||''}" style="background:${u.color}" title="${u.name}">${u.name[0]}</span>`;
@@ -509,6 +524,7 @@ function storageSet(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){
 function createSampleData(){
   const t = today();
   return {
+    users:DEFAULT_USERS.map(u=>({name:u.name,color:u.color})),
     projects:[
       {id:uid(),name:'Website Redesign',color:'#4f6ef7',tasks:[
         {id:uid(),name:'Discovery & Research',startDate:fmtDate(addDays(t,-56)),endDate:fmtDate(addDays(t,-45)),assignee:'Alice',status:'done',notes:'',colorIndex:0,isMilestone:false,lastEditedBy:'Alice',lastEditedAt:Date.now()-864e5*30},
@@ -564,8 +580,11 @@ function loadState(){
     d = createSampleData();
     addSampleDependencies(d);
   }
+  if(!d.users || !Array.isArray(d.users) || d.users.length===0){
+    d.users=DEFAULT_USERS.map(u=>({name:u.name,color:u.color}));
+  }
   if(!d.activeProjectId && d.projects.length>0) d.activeProjectId=d.projects[0].id;
-  d.activeUser = storageGet(SK.user) || d.activeUser || 'Alice';
+  d.activeUser = storageGet(SK.user) || d.activeUser || d.users[0].name;
   d.viewMode = d.viewMode || 'monthly';
   d.zoomLevel = d.zoomLevel || 1;
   state = d;
@@ -641,6 +660,7 @@ function renderSidebar(){
         <span class="proj-count">${total}</span>
       </div>
       <div class="proj-progress"><div class="proj-progress-fill" style="width:${pct}%;background:${p.color}"></div></div>
+      <button class="proj-rename" data-rename-pid="${p.id}" title="Rename project"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 2.5l3 3L4.5 12.5H1.5v-3z"/><line x1="7" y1="4" x2="10" y2="7"/></svg></button>
       <button class="proj-delete" data-del-pid="${p.id}" title="Delete project"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="3" y1="3" x2="11" y2="11"/><line x1="11" y1="3" x2="3" y2="11"/></svg></button>
     </div>`;
   }).join('');
@@ -651,7 +671,8 @@ function renderTopbar(){
   document.getElementById('project-title').textContent=proj?proj.name:'No Project';
   const u=userObj(state.activeUser);
   document.getElementById('user-btn').innerHTML=`${avatarHTML(state.activeUser)}<span class="uname">${u.name}</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="2.5 4 5 6.5 7.5 4"/></svg>`;
-  document.getElementById('user-dropdown').innerHTML=USERS.map(u=>`<button class="user-option ${u.name===state.activeUser?'active':''}" data-user="${u.name}">${avatarHTML(u.name)} ${u.name}</button>`).join('');
+  document.getElementById('user-dropdown').innerHTML=state.users.map(u=>`<button class="user-option ${u.name===state.activeUser?'active':''}" data-user="${u.name}">${avatarHTML(u.name)} <span class="uo-name">${u.name}</span><span class="user-delete" data-del-user="${u.name}" title="Remove user"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="3" y1="3" x2="9" y2="9"/><line x1="9" y1="3" x2="3" y2="9"/></svg></span></button>`).join('')
+    +'<div class="user-dropdown-divider"></div><button class="user-add-btn" id="btn-add-user"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="2" x2="6" y2="10"/><line x1="2" y1="6" x2="10" y2="6"/></svg> Add User</button>';
   const theme=document.documentElement.getAttribute('data-theme');
   document.getElementById('btn-theme').innerHTML=theme==='dark'
     ?'<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="3.5"/><line x1="8" y1="1" x2="8" y2="3"/><line x1="8" y1="13" x2="8" y2="15"/><line x1="1" y1="8" x2="3" y2="8"/><line x1="13" y1="8" x2="15" y2="8"/><line x1="3.05" y1="3.05" x2="4.46" y2="4.46"/><line x1="11.54" y1="11.54" x2="12.95" y2="12.95"/><line x1="3.05" y1="12.95" x2="4.46" y2="11.54"/><line x1="11.54" y1="4.46" x2="12.95" y2="3.05"/></svg>'
@@ -886,7 +907,7 @@ function renderEditPanelContent(taskId){
     <div class="ep-field"><label>Task Name</label><input type="text" id="ep-name" value="${esc(task.name)}"></div>
     <div class="ep-field"><label>Start Date</label><input type="date" id="ep-start" value="${task.startDate}"></div>
     <div class="ep-field"><label>End Date</label><input type="date" id="ep-end" value="${task.endDate}"${task.isMilestone?' disabled':''}></div>
-    <div class="ep-field"><label>Assignee</label><select id="ep-assignee"><option value="">Unassigned</option>${USERS.map(u=>`<option value="${u.name}"${task.assignee===u.name?' selected':''}>${u.name}</option>`).join('')}</select></div>
+    <div class="ep-field"><label>Assignee</label><select id="ep-assignee"><option value="">Unassigned</option>${state.users.map(u=>`<option value="${u.name}"${task.assignee===u.name?' selected':''}>${u.name}</option>`).join('')}</select></div>
     <div class="ep-field"><label>Status</label><div class="status-options">${statuses.map(s=>`<button class="status-opt ${task.status===s?'active':''}" data-status="${s}" style="${task.status===s?'background:'+STATUS_MAP[s].color:''}">${STATUS_MAP[s].label}</button>`).join('')}</div></div>
     <div class="ep-field"><label>Notes</label><textarea id="ep-notes" rows="3">${esc(task.notes||'')}</textarea></div>
     ${task.isMilestone?'<div class="ep-field"><label>Type</label><div style="font-size:12px;color:var(--text-secondary)">◆ Milestone (zero-duration)</div></div>':''}
@@ -1246,6 +1267,22 @@ function nudgeTask(tid,days){
 function setupEvents(){
   // Sidebar project click
   document.getElementById('project-list').addEventListener('click',function(e){
+    const rename=e.target.closest('[data-rename-pid]');
+    if(rename){
+      e.stopPropagation();
+      const pid=rename.dataset.renamePid;
+      const proj=state.projects.find(p=>p.id===pid);
+      if(!proj)return;
+      showInputModal('Rename Project','New name:',proj.name,'Rename',name=>{
+        name=name.trim();
+        if(!name)return;
+        pushUndo();
+        proj.name=name;
+        commitState();
+        showToast('Project renamed');
+      });
+      return;
+    }
     const del=e.target.closest('[data-del-pid]');
     if(del){
       e.stopPropagation();
@@ -1350,6 +1387,38 @@ function setupEvents(){
     document.getElementById('user-dropdown').classList.toggle('open');
   });
   document.getElementById('user-dropdown').addEventListener('click',e=>{
+    const delBtn=e.target.closest('.user-delete');
+    if(delBtn){
+      e.stopPropagation();
+      const userName=delBtn.dataset.delUser;
+      if(state.users.length<=1){showToast('Must have at least one user');return}
+      document.getElementById('user-dropdown').classList.remove('open');
+      showConfirmModal('Remove User',`Remove "${esc(userName)}"? Tasks assigned to them will become unassigned.`,'Remove','danger',()=>{
+        pushUndo();
+        state.users=state.users.filter(u=>u.name!==userName);
+        if(state.activeUser===userName) state.activeUser=state.users[0].name;
+        state.projects.forEach(p=>{p.tasks.forEach(t=>{if(t.assignee===userName)t.assignee=null})});
+        commitState();
+        showToast('User removed');
+      });
+      return;
+    }
+    const addBtn=e.target.closest('#btn-add-user');
+    if(addBtn){
+      e.stopPropagation();
+      document.getElementById('user-dropdown').classList.remove('open');
+      showInputModal('Add User','Enter user name:','','Add',name=>{
+        name=name.trim();
+        if(!name){showToast('Name cannot be empty');return}
+        if(state.users.some(u=>u.name.toLowerCase()===name.toLowerCase())){showToast('User already exists');return}
+        pushUndo();
+        const color=PALETTE[state.users.length%PALETTE.length];
+        state.users.push({name,color});
+        commitState();
+        showToast('User "'+name+'" added');
+      });
+      return;
+    }
     const opt=e.target.closest('.user-option');
     if(opt){
       state.activeUser=opt.dataset.user;
