@@ -3,6 +3,8 @@
   - GitHub Pages: push as index.html to main branch, enable Pages in Settings > Pages > Source: main / root
   - Netlify Drop: drag this file to netlify.com/drop — live in seconds, no account needed
   - Vercel / Cloudflare Pages: connect repo or drag-and-drop, free tier available
+  - Netlify + GitHub: set env GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GANTT_API_SECRET; optional GANTT_FILE_PATH
+    (default data/gantt-state.json). Editors use Export > Remote (GitHub)…; API secret in sessionStorage only.
 -->
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
@@ -376,6 +378,7 @@ input[type="file"]{display:none}
             <button class="export-option" id="btn-export-png"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="2" width="10" height="10" rx="2"/><circle cx="5" cy="5.5" r="1.2"/><path d="M2 10l3-3 2 2 3-4 2 3"/></svg> Export as PNG</button>
             <button class="export-option" id="btn-export-json"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 2H3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1h-1"/><rect x="4.5" y="1" width="5" height="3" rx="1"/></svg> Export as JSON</button>
             <button class="export-option" id="btn-import-json"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 5.5v-3h8v3"/><polyline points="5.5 8.5 7 6.5 8.5 8.5"/><line x1="7" y1="12" x2="7" y2="6.5"/></svg> Import JSON</button>
+            <button class="export-option" id="btn-remote-sync"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><ellipse cx="7" cy="4" rx="3" ry="1.8"/><path d="M4 4v3c0 1.2 1.3 2.2 3 2.2s3-1 3-2.2V4"/><path d="M4 7v3c0 1.2 1.3 2.2 3 2.2"/></svg> Remote (GitHub)…</button>
           </div>
         </div>
         <button class="tb-btn" id="btn-shortcuts" title="Keyboard shortcuts"><kbd style="font-size:13px;font-weight:700;padding:0 2px">?</kbd></button>
@@ -446,7 +449,11 @@ input[type="file"]{display:none}
  * }
  */
 
-const SK = { data:'gantt_projects', theme:'gantt_theme', user:'gantt_active_user' };
+const SK = { data:'gantt_projects', theme:'gantt_theme', user:'gantt_active_user', remoteApi:'gantt_remote_api_secret' };
+const REMOTE_LOAD = '/.netlify/functions/load-gantt';
+const REMOTE_SAVE = '/.netlify/functions/save-gantt';
+const REMOTE_SAVE_DEBOUNCE_MS = 450;
+const MAX_REMOTE_BYTES = Math.floor(1.45 * 1024 * 1024);
 
 const DEFAULT_USERS = [
   {name:'Alice',color:'#4f6ef7'},
@@ -478,6 +485,8 @@ let dragInfo = null;
 let depDrawing = null;
 let tooltipTimer = null;
 let scrollToTodayOnce = true;
+let remoteSaveTimer = null;
+let remoteSaveInFlight = false;
 
 // ─── Utilities ──────────────────────────────────────────────
 function uid(){return Math.random().toString(36).substr(2,9)}
@@ -519,6 +528,81 @@ function darkenColor(hex,amt){
 // ─── localStorage helpers ───────────────────────────────────
 function storageGet(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null}catch(e){return null}}
 function storageSet(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
+
+// ─── Remote (GitHub via Netlify Functions) ─────────────────
+function getRemoteApiSecret(){
+  try{return sessionStorage.getItem(SK.remoteApi)||''}catch(e){return ''}
+}
+function setRemoteApiSecret(sec){
+  try{if(sec)sessionStorage.setItem(SK.remoteApi,sec);else sessionStorage.removeItem(SK.remoteApi)}catch(e){}
+}
+function remoteAuthHeaders(){
+  const t=getRemoteApiSecret();return t?{Authorization:'Bearer '+t}:{};
+}
+function serializeStateForRemote(){
+  return{
+    users:state.users,
+    projects:state.projects,
+    activeProjectId:state.activeProjectId,
+    activeUser:state.activeUser,
+    viewMode:state.viewMode,
+    zoomLevel:state.zoomLevel
+  };
+}
+function validateRemotePayload(d){
+  return d&&typeof d==='object'&&!Array.isArray(d)&&Array.isArray(d.projects);
+}
+function mergeRemoteIntoState(d){
+  state.users=d.users&&d.users.length?d.users.map(u=>({name:String(u.name),color:String(u.color)})):DEFAULT_USERS.map(u=>({name:u.name,color:u.color}));
+  state.projects=JSON.parse(JSON.stringify(d.projects));
+  state.projects.forEach(p=>{if(!Array.isArray(p.dependencies))p.dependencies=[]});
+  state.activeProjectId=d.activeProjectId||(state.projects[0]&&state.projects[0].id)||null;
+  state.activeUser=(d.activeUser&&state.users.some(u=>u.name===d.activeUser))?d.activeUser:state.users[0].name;
+  state.viewMode=d.viewMode==='weekly'?'weekly':'monthly';
+  state.zoomLevel=typeof d.zoomLevel==='number'?d.zoomLevel:1;
+  if(!state.activeProjectId&&state.projects.length>0)state.activeProjectId=state.projects[0].id;
+}
+function saveLocalOnly(){
+  storageSet(SK.data,state);
+  storageSet(SK.user,state.activeUser);
+}
+function remoteHasMeaningfulData(d){
+  return d&&(d.projects&&d.projects.length>0||(d.users&&d.users.length>0));
+}
+async function fetchRemoteState(){
+  const r=await fetch(REMOTE_LOAD,{headers:Object.assign({'Accept':'application/json'},remoteAuthHeaders())});
+  if(r.status===401){setRemoteApiSecret('');throw new Error('unauthorized')}
+  if(!r.ok)throw new Error('load failed');
+  return r.json();
+}
+async function pushRemoteState(){
+  const sec=getRemoteApiSecret();
+  if(!sec||!state)return false;
+  clearTimeout(remoteSaveTimer);
+  remoteSaveTimer=null;
+  const body=JSON.stringify(serializeStateForRemote());
+  if(body.length>MAX_REMOTE_BYTES){showToast('Data too large for remote save');return false}
+  if(remoteSaveInFlight)return false;
+  remoteSaveInFlight=true;
+  try{
+    const r=await fetch(REMOTE_SAVE,{method:'POST',headers:Object.assign({'Content-Type':'application/json'},remoteAuthHeaders()),body});
+    if(r.status===401){setRemoteApiSecret('');showToast('Remote: session unauthorized');return false}
+    if(r.status===413){showToast('Payload too large');return false}
+    if(r.status===409){showToast('Remote conflict — reload from GitHub');return false}
+    if(!r.ok){showToast('Remote save failed');return false}
+    return true;
+  }catch(e){
+    showToast('Remote save failed');
+    return false;
+  }finally{
+    remoteSaveInFlight=false;
+  }
+}
+function queueRemoteSave(){
+  if(!getRemoteApiSecret())return;
+  clearTimeout(remoteSaveTimer);
+  remoteSaveTimer=setTimeout(()=>{pushRemoteState()},REMOTE_SAVE_DEBOUNCE_MS);
+}
 
 // ─── Sample data ────────────────────────────────────────────
 function createSampleData(){
@@ -574,7 +658,7 @@ function addSampleDependencies(data){
 }
 
 // ─── State management ───────────────────────────────────────
-function loadState(){
+function applyLocalOrSample(){
   let d = storageGet(SK.data);
   if(!d || !d.projects || d.projects.length===0){
     d = createSampleData();
@@ -588,12 +672,28 @@ function loadState(){
   d.viewMode = d.viewMode || 'monthly';
   d.zoomLevel = d.zoomLevel || 1;
   state = d;
-  saveState();
+  saveLocalOnly();
+}
+
+async function loadState(){
+  const secret = getRemoteApiSecret();
+  if(secret){
+    try{
+      const data = await fetchRemoteState();
+      if(validateRemotePayload(data) && remoteHasMeaningfulData(data)){
+        state = {users:[],projects:[],activeProjectId:null,activeUser:null,viewMode:'monthly',zoomLevel:1};
+        mergeRemoteIntoState(data);
+        saveLocalOnly();
+        return;
+      }
+    }catch(e){}
+  }
+  applyLocalOrSample();
 }
 
 function saveState(){
-  storageSet(SK.data, state);
-  storageSet(SK.user, state.activeUser);
+  saveLocalOnly();
+  queueRemoteSave();
 }
 
 function pushUndo(){
@@ -612,7 +712,8 @@ function undo(){
   redoStack.push(deepClone(state));
   if(redoStack.length>UNDO_LIMIT)redoStack.shift();
   state=undoStack.pop();
-  saveState();
+  saveLocalOnly();
+  queueRemoteSave();
   render();
 }
 
@@ -621,7 +722,8 @@ function redo(){
   undoStack.push(deepClone(state));
   if(undoStack.length>UNDO_LIMIT)undoStack.shift();
   state=redoStack.pop();
-  saveState();
+  saveLocalOnly();
+  queueRemoteSave();
   render();
 }
 
@@ -1444,6 +1546,10 @@ function setupEvents(){
   document.getElementById('btn-import-json').addEventListener('click',()=>{
     document.getElementById('json-file-input').click();
   });
+  document.getElementById('btn-remote-sync').addEventListener('click',()=>{
+    closeAllDropdowns();
+    showRemoteSyncModal();
+  });
   document.getElementById('json-file-input').addEventListener('change',importJSON);
 
   // Shortcuts
@@ -1525,6 +1631,52 @@ function showInputModal(title,msg,defaultVal,btnText,onConfirm){
   inp.addEventListener('keydown',e=>{if(e.key==='Enter'){closeModal();onConfirm(inp.value)}});
   document.getElementById('mc-cancel').addEventListener('click',closeModal);
   document.getElementById('mc-confirm').addEventListener('click',()=>{closeModal();onConfirm(inp.value)});
+}
+
+function showRemoteSyncModal(){
+  const connected=!!getRemoteApiSecret();
+  showModal(`<h3>Remote storage (GitHub)</h3><p>Enter the API secret from your Netlify environment (<code>GANTT_API_SECRET</code>). It is stored in <strong>session storage</strong> until you close the tab. Never commit this secret.</p>${connected?'<p style="font-size:12px;color:var(--text-secondary)">Session: connected</p>':''}<input type="password" class="modal-input" id="modal-remote-secret" placeholder="API secret" autocomplete="off"><div id="modal-actions" style="flex-wrap:wrap;gap:8px"><button class="modal-cancel" id="mc-cancel">Close</button>${connected?'<button class="modal-danger" id="mc-disconnect">Disconnect</button>':''}<button class="modal-confirm" id="mc-load">Load from GitHub</button><button class="modal-confirm" id="mc-save">Save to GitHub now</button></div>`);
+  document.getElementById('mc-cancel').addEventListener('click',closeModal);
+  const disc=document.getElementById('mc-disconnect');
+  if(disc)disc.addEventListener('click',()=>{setRemoteApiSecret('');closeModal();showToast('Remote disconnected');updateRemoteMenuLabel();});
+  document.getElementById('mc-load').addEventListener('click',async ()=>{
+    const v=document.getElementById('modal-remote-secret').value.trim();
+    if(v)setRemoteApiSecret(v);
+    if(!getRemoteApiSecret()){showToast('Enter API secret');return}
+    closeModal();
+    try{
+      const data=await fetchRemoteState();
+      if(!validateRemotePayload(data)){showToast('Invalid remote data');return}
+      if(!remoteHasMeaningfulData(data)){showToast('Remote is empty — keeping local data');updateRemoteMenuLabel();return}
+      showConfirmModal('Replace local data?','Load state from GitHub? Unsaved local changes will be overwritten.','Load','confirm',async ()=>{
+        state={users:[],projects:[],activeProjectId:null,activeUser:null,viewMode:'monthly',zoomLevel:1};
+        mergeRemoteIntoState(data);
+        undoStack=[];redoStack=[];
+        saveLocalOnly();
+        updateRemoteMenuLabel();
+        scrollToTodayOnce=true;
+        render();
+        showToast('Loaded from GitHub');
+      });
+    }catch(e){showToast('Load failed (check secret and Netlify)');}
+  });
+  document.getElementById('mc-save').addEventListener('click',async ()=>{
+    const v=document.getElementById('modal-remote-secret').value.trim();
+    if(v)setRemoteApiSecret(v);
+    if(!getRemoteApiSecret()){showToast('Enter API secret');return}
+    closeModal();
+    const ok=await pushRemoteState();
+    if(ok)showToast('Saved to GitHub');
+    updateRemoteMenuLabel();
+  });
+}
+
+function updateRemoteMenuLabel(){
+  const el=document.getElementById('btn-remote-sync');
+  if(!el)return;
+  el.innerHTML=getRemoteApiSecret()
+    ?'<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><ellipse cx="7" cy="4" rx="3" ry="1.8"/><path d="M4 4v3c0 1.2 1.3 2.2 3 2.2s3-1 3-2.2V4"/><path d="M4 7v3c0 1.2 1.3 2.2 3 2.2"/></svg> Remote ●'
+    :'<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><ellipse cx="7" cy="4" rx="3" ry="1.8"/><path d="M4 4v3c0 1.2 1.3 2.2 3 2.2s3-1 3-2.2V4"/><path d="M4 7v3c0 1.2 1.3 2.2 3 2.2"/></svg> Remote (GitHub)…';
 }
 
 function showChoiceModal(title,msg,choices,onChoice){
@@ -1694,9 +1846,10 @@ function esc(s){
 }
 
 // ─── Init ───────────────────────────────────────────────────
-function init(){
+async function init(){
   initTheme();
-  loadState();
+  await loadState();
+  updateRemoteMenuLabel();
   render();
   setupDrag();
   setupKeyboard();
