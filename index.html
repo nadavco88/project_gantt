@@ -365,6 +365,8 @@ input[type="file"]{display:none}
         <button class="tb-btn" id="btn-undo" title="Undo (Ctrl+Z)"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h6a3.5 3.5 0 0 1 0 7H8"/><polyline points="5.5 3 3 5.5 5.5 8"/></svg></button>
         <button class="tb-btn" id="btn-redo" title="Redo (Ctrl+Shift+Z)"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5.5H6a3.5 3.5 0 0 0 0 7h1"/><polyline points="9.5 3 12 5.5 9.5 8"/></svg></button>
         <div class="tb-separator"></div>
+        <button class="tb-btn primary" id="btn-save-server" type="button" title="Save to server (shared for all devices)"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 12.5h-9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h7l3 3v7a1 1 0 0 1-1 1z"/><path d="M9.5 12.5v-4h-5v4"/><path d="M4.5 2.5v3h4"/></svg> Save</button>
+        <div class="tb-separator"></div>
         <div id="user-selector">
           <button id="user-btn"></button>
           <div id="user-dropdown"></div>
@@ -452,7 +454,6 @@ input[type="file"]{display:none}
 const SK = { data:'gantt_projects', theme:'gantt_theme', user:'gantt_active_user', remoteApi:'gantt_remote_api_secret' };
 const REMOTE_LOAD = '/.netlify/functions/load-gantt';
 const REMOTE_SAVE = '/.netlify/functions/save-gantt';
-const REMOTE_SAVE_DEBOUNCE_MS = 450;
 const MAX_REMOTE_BYTES = Math.floor(1.45 * 1024 * 1024);
 
 const DEFAULT_USERS = [
@@ -485,7 +486,6 @@ let dragInfo = null;
 let depDrawing = null;
 let tooltipTimer = null;
 let scrollToTodayOnce = true;
-let remoteSaveTimer = null;
 let remoteSaveInFlight = false;
 
 // ─── Utilities ──────────────────────────────────────────────
@@ -570,10 +570,6 @@ function saveLocalOnly(){
 function remoteSnapshotIsEmpty(d){
   return d&&(!d.projects||d.projects.length===0)&&(!d.users||d.users.length===0);
 }
-function localCacheHasProjects(){
-  const d=storageGet(SK.data);
-  return !!(d&&d.projects&&d.projects.length>0);
-}
 async function fetchRemoteState(){
   const r=await fetch(REMOTE_LOAD,{headers:Object.assign({'Accept':'application/json'},remoteAuthHeaders())});
   if(r.status===401){setRemoteApiSecret('');throw new Error('unauthorized')}
@@ -586,8 +582,6 @@ async function pushRemoteState(opts){
   const silent=opts.silent!==void 0?opts.silent:keepalive;
   const sec=getRemoteApiSecret();
   if(!sec||!state)return false;
-  clearTimeout(remoteSaveTimer);
-  remoteSaveTimer=null;
   const body=JSON.stringify(serializeStateForRemote());
   if(body.length>MAX_REMOTE_BYTES){if(!silent)showToast('Data too large for remote save');return false}
   if(remoteSaveInFlight&&!keepalive)return false;
@@ -606,16 +600,9 @@ async function pushRemoteState(opts){
     remoteSaveInFlight=false;
   }
 }
-function queueRemoteSave(){
-  if(!getRemoteApiSecret())return;
-  clearTimeout(remoteSaveTimer);
-  remoteSaveTimer=setTimeout(()=>{pushRemoteState()},REMOTE_SAVE_DEBOUNCE_MS);
-}
 function flushRemoteToGitHub(){
   if(!getRemoteApiSecret()||!state)return;
-  clearTimeout(remoteSaveTimer);
-  remoteSaveTimer=null;
-  void pushRemoteState({keepalive:true});
+  void pushRemoteState({keepalive:true,silent:true});
 }
 function setupRemoteLifecycleFlush(){
   window.addEventListener('pagehide',function(){flushRemoteToGitHub()});
@@ -698,10 +685,6 @@ async function loadState(){
     try{
       const data = await fetchRemoteState();
       if(validateRemotePayload(data)){
-        if(remoteSnapshotIsEmpty(data)&&localCacheHasProjects()){
-          applyLocalOrSample();
-          return;
-        }
         state = {users:[],projects:[],activeProjectId:null,activeUser:null,viewMode:'monthly',zoomLevel:1};
         mergeRemoteIntoState(data);
         saveLocalOnly();
@@ -716,7 +699,6 @@ async function loadState(){
 
 function saveState(){
   saveLocalOnly();
-  queueRemoteSave();
 }
 
 function pushUndo(){
@@ -736,7 +718,6 @@ function undo(){
   if(redoStack.length>UNDO_LIMIT)redoStack.shift();
   state=undoStack.pop();
   saveLocalOnly();
-  queueRemoteSave();
   render();
 }
 
@@ -746,7 +727,6 @@ function redo(){
   if(undoStack.length>UNDO_LIMIT)undoStack.shift();
   state=redoStack.pop();
   saveLocalOnly();
-  queueRemoteSave();
   render();
 }
 
@@ -1490,6 +1470,19 @@ function setupEvents(){
   // Undo / Redo
   document.getElementById('btn-undo').addEventListener('click',undo);
   document.getElementById('btn-redo').addEventListener('click',redo);
+
+  document.getElementById('btn-save-server').addEventListener('click',async()=>{
+    if(!getRemoteApiSecret()){
+      showToast('Connect via Export → Remote (GitHub)… first');
+      return;
+    }
+    const btn=document.getElementById('btn-save-server');
+    btn.disabled=true;
+    try{
+      const ok=await pushRemoteState();
+      if(ok){ saveLocalOnly(); showToast('Saved to server'); }
+    }finally{ btn.disabled=false; }
+  });
 
   // View toggle
   document.querySelectorAll('.view-toggle button').forEach(btn=>{
