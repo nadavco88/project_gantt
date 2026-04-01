@@ -4,7 +4,7 @@
   - Netlify Drop: drag this file to netlify.com/drop — live in seconds, no account needed
   - Vercel / Cloudflare Pages: connect repo or drag-and-drop, free tier available
   - Netlify + GitHub: set env GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GANTT_API_SECRET; optional GANTT_FILE_PATH
-    (default data/gantt-state.json). With sync on, GitHub is the shared source of truth; localStorage is a cache. Export > Remote (GitHub)…; API secret in localStorage per device.
+    (default data/gantt-state.json). Paste GANTT_API_SECRET in Export → Remote (GitHub)… (sessionStorage per tab). No PAT in the repo or client bundle.
 -->
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
@@ -52,6 +52,9 @@
 html,body{height:100%;overflow:hidden;font-family:'Inter',system-ui,-apple-system,sans-serif;
   background:var(--bg-primary);color:var(--text-primary);transition:background .25s,color .25s}
 body{display:flex;flex-direction:column}
+body.storage-loading{pointer-events:none;opacity:.94}
+.github-sync-indicator{position:fixed;top:0;left:0;right:0;z-index:9999;text-align:center;padding:8px 12px;font-size:13px;font-weight:500;background:var(--accent);color:#fff;box-shadow:var(--shadow-lg)}
+.github-sync-indicator[hidden]{display:none!important}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:var(--scrollbar-track)}
 ::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:4px}
@@ -417,6 +420,7 @@ input[type="file"]{display:none}
 
 <div id="modal-overlay"><div id="modal-box"></div></div>
 <div id="float-label"></div>
+<div id="github-sync-indicator" class="github-sync-indicator" hidden aria-live="polite"></div>
 <div id="toast"></div>
 <div class="bar-tooltip" id="bar-tooltip"></div>
 <input type="file" id="json-file-input" accept=".json">
@@ -455,6 +459,9 @@ const SK = { data:'gantt_projects', theme:'gantt_theme', user:'gantt_active_user
 const REMOTE_LOAD = '/.netlify/functions/load-gantt';
 const REMOTE_SAVE = '/.netlify/functions/save-gantt';
 const MAX_REMOTE_BYTES = Math.floor(1.45 * 1024 * 1024);
+const REMOTE_SAVE_DEBOUNCE_MS = 500;
+
+let remoteSaveTimer = null;
 
 const DEFAULT_USERS = [
   {name:'Alice',color:'#4f6ef7'},
@@ -525,20 +532,32 @@ function darkenColor(hex,amt){
   return '#'+(r<16?'0':'')+r.toString(16)+(g<16?'0':'')+g.toString(16)+(b<16?'0':'')+b.toString(16);
 }
 
-// ─── localStorage helpers ───────────────────────────────────
+// ─── localStorage (Gantt cache; theme below) ─────────────────
 function storageGet(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null}catch(e){return null}}
 function storageSet(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 
 // ─── Remote (GitHub via Netlify Functions) ─────────────────
-// When API secret is set: GitHub is the source of truth; localStorage is a cache/offline fallback.
+// PAT and GITHUB_TOKEN never ship to the browser. Set them in Netlify env only.
+// GANTT_API_SECRET is entered in Export → Remote (GitHub)… and kept in sessionStorage.
 function getRemoteApiSecret(){
-  try{return localStorage.getItem(SK.remoteApi)||''}catch(e){return ''}
+  try{return sessionStorage.getItem(SK.remoteApi)||''}catch(e){return ''}
 }
 function setRemoteApiSecret(sec){
-  try{if(sec)localStorage.setItem(SK.remoteApi,sec);else localStorage.removeItem(SK.remoteApi)}catch(e){}
+  try{if(sec)sessionStorage.setItem(SK.remoteApi,sec);else sessionStorage.removeItem(SK.remoteApi)}catch(e){}
 }
 function remoteAuthHeaders(){
   const t=getRemoteApiSecret();return t?{Authorization:'Bearer '+t}:{};
+}
+function setGithubSyncIndicator(mode, msg){
+  const el = document.getElementById('github-sync-indicator');
+  if (!el) return;
+  if (mode === 'hidden') {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  el.hidden = false;
+  el.textContent = msg || (mode === 'loading' ? 'Loading from GitHub…' : 'Saving to GitHub…');
 }
 function serializeStateForRemote(){
   return{
@@ -566,6 +585,7 @@ function mergeRemoteIntoState(d){
 function saveLocalOnly(){
   storageSet(SK.data,state);
   storageSet(SK.user,state.activeUser);
+  queueRemoteSave();
 }
 function remoteSnapshotIsEmpty(d){
   return d&&(!d.projects||d.projects.length===0)&&(!d.users||d.users.length===0);
@@ -575,6 +595,11 @@ async function fetchRemoteState(){
   if(r.status===401){setRemoteApiSecret('');throw new Error('unauthorized')}
   if(!r.ok)throw new Error('load failed');
   return r.json();
+}
+function queueRemoteSave(){
+  if(!getRemoteApiSecret())return;
+  clearTimeout(remoteSaveTimer);
+  remoteSaveTimer=setTimeout(()=>{void pushRemoteState({silent:true})},REMOTE_SAVE_DEBOUNCE_MS);
 }
 async function pushRemoteState(opts){
   opts=opts||{};
@@ -586,6 +611,7 @@ async function pushRemoteState(opts){
   if(body.length>MAX_REMOTE_BYTES){if(!silent)showToast('Data too large for remote save');return false}
   if(remoteSaveInFlight&&!keepalive)return false;
   remoteSaveInFlight=true;
+  if(!silent&&!keepalive)setGithubSyncIndicator('saving','Saving to GitHub…');
   try{
     const r=await fetch(REMOTE_SAVE,Object.assign({method:'POST',headers:Object.assign({'Content-Type':'application/json'},remoteAuthHeaders()),body},keepalive?{keepalive:true}:{}));
     if(r.status===401){setRemoteApiSecret('');if(!silent)showToast('Remote: invalid API secret');return false}
@@ -598,10 +624,13 @@ async function pushRemoteState(opts){
     return false;
   }finally{
     remoteSaveInFlight=false;
+    if(!silent&&!keepalive)setGithubSyncIndicator('hidden');
   }
 }
 function flushRemoteToGitHub(){
   if(!getRemoteApiSecret()||!state)return;
+  clearTimeout(remoteSaveTimer);
+  remoteSaveTimer=null;
   void pushRemoteState({keepalive:true,silent:true});
 }
 function setupRemoteLifecycleFlush(){
@@ -680,21 +709,28 @@ function applyLocalOrSample(){
 }
 
 async function loadState(){
-  const secret = getRemoteApiSecret();
-  if(secret){
-    try{
-      const data = await fetchRemoteState();
-      if(validateRemotePayload(data)){
-        state = {users:[],projects:[],activeProjectId:null,activeUser:null,viewMode:'monthly',zoomLevel:1};
-        mergeRemoteIntoState(data);
-        saveLocalOnly();
-        return;
+  document.body.classList.add('storage-loading');
+  setGithubSyncIndicator('loading', 'Loading from GitHub…');
+  try{
+    const secret = getRemoteApiSecret();
+    if(secret){
+      try{
+        const data = await fetchRemoteState();
+        if(validateRemotePayload(data)){
+          state = {users:[],projects:[],activeProjectId:null,activeUser:null,viewMode:'monthly',zoomLevel:1};
+          mergeRemoteIntoState(data);
+          saveLocalOnly();
+          return;
+        }
+      }catch(e){
+        showToast('Could not load from GitHub — using local data. Check deploy and secret.');
       }
-    }catch(e){
-      showToast('Could not load from GitHub — using local data. Check deploy and secret.');
     }
+    applyLocalOrSample();
+  }finally{
+    setGithubSyncIndicator('hidden');
+    document.body.classList.remove('storage-loading');
   }
-  applyLocalOrSample();
 }
 
 function saveState(){
@@ -1480,7 +1516,7 @@ function setupEvents(){
     btn.disabled=true;
     try{
       const ok=await pushRemoteState();
-      if(ok){ saveLocalOnly(); showToast('Saved to server'); }
+      if(ok){ storageSet(SK.data,state); storageSet(SK.user,state.activeUser); showToast('Saved to server'); }
     }finally{ btn.disabled=false; }
   });
 
@@ -1651,7 +1687,7 @@ function showInputModal(title,msg,defaultVal,btnText,onConfirm){
 
 function showRemoteSyncModal(){
   const connected=!!getRemoteApiSecret();
-  showModal(`<h3>Remote storage (GitHub)</h3><p>With cloud sync on, <strong>GitHub is the shared source of truth</strong>; this browser also keeps a local copy for speed. Paste the same API secret as in Netlify (<code>GANTT_API_SECRET</code>) — stored in <strong>local storage</strong> on this device until you disconnect. Each device enters the secret once.</p>${connected?'<p style="font-size:12px;color:var(--text-secondary)">Cloud sync: on (this browser)</p>':''}<input type="password" class="modal-input" id="modal-remote-secret" placeholder="API secret" autocomplete="off"><div id="modal-actions" style="flex-wrap:wrap;gap:8px"><button class="modal-cancel" id="mc-cancel">Close</button>${connected?'<button class="modal-danger" id="mc-disconnect">Disconnect</button>':''}<button class="modal-confirm" id="mc-load">Load from GitHub</button><button class="modal-confirm" id="mc-save">Save to GitHub now</button></div>`);
+  showModal(`<h3>Remote storage (GitHub)</h3><p>GitHub credentials stay on Netlify only. Paste the same <strong>API secret</strong> as in Netlify (<code>GANTT_API_SECRET</code>) — stored in <strong>session storage</strong> until you close the tab. Each trusted editor enters it once per session.</p>${connected?'<p style="font-size:12px;color:var(--text-secondary)">Cloud sync: on (this tab)</p>':''}<input type="password" class="modal-input" id="modal-remote-secret" placeholder="API secret" autocomplete="off"><div id="modal-actions" style="flex-wrap:wrap;gap:8px"><button class="modal-cancel" id="mc-cancel">Close</button>${connected?'<button class="modal-danger" id="mc-disconnect">Disconnect</button>':''}<button class="modal-confirm" id="mc-load">Load from GitHub</button><button class="modal-confirm" id="mc-save">Save to GitHub now</button></div>`);
   document.getElementById('mc-cancel').addEventListener('click',closeModal);
   const disc=document.getElementById('mc-disconnect');
   if(disc)disc.addEventListener('click',()=>{setRemoteApiSecret('');closeModal();showToast('Remote disconnected');updateRemoteMenuLabel();});
@@ -1665,7 +1701,7 @@ function showRemoteSyncModal(){
       if(!validateRemotePayload(data)){showToast('Invalid remote data');return}
       const emptyRemote=remoteSnapshotIsEmpty(data);
       const msg=emptyRemote
-        ?'GitHub has no projects yet. Replace this browser’s local data with an empty board?'
+        ?'GitHub has no projects yet. Replace this browser\u2019s local data with an empty board?'
         :'Load state from GitHub? Unsaved local changes will be overwritten.';
       showConfirmModal('Replace local data?',msg,'Load','confirm',()=>{
         state={users:[],projects:[],activeProjectId:null,activeUser:null,viewMode:'monthly',zoomLevel:1};

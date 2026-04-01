@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 const crypto = require('crypto');
 
@@ -7,7 +7,11 @@ const MAX_BYTES = Math.floor(1.5 * 1024 * 1024);
 function json(statusCode, body) {
   return {
     statusCode,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type'
+    },
     body: JSON.stringify(body)
   };
 }
@@ -61,6 +65,7 @@ exports.handler = async function (event) {
     return {
       statusCode: 204,
       headers: {
+        'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Authorization, Content-Type'
       },
