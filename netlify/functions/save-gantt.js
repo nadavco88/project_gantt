@@ -1,18 +1,14 @@
 // netlify/functions/save-gantt.js
 // POST /.netlify/functions/save-gantt
-// Validates, stamps, and writes gantt-state.json to GitHub (atomic via SHA).
+// Validates the state blob and upserts/deletes rows in Supabase.
 
 const crypto = require('crypto');
-const https  = require('https');
 
-const FILE_PATH   = process.env.GANTT_FILE_PATH || 'data/gantt-state.json';
-const OWNER       = process.env.GITHUB_OWNER;
-const REPO        = process.env.GITHUB_REPO;
-const TOKEN       = process.env.GITHUB_TOKEN;
-const BRANCH      = process.env.GITHUB_BRANCH || 'main';
-const API_SECRET  = process.env.GANTT_API_SECRET;
+const SUPABASE_URL         = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const API_SECRET           = process.env.GANTT_API_SECRET;
 
-const MAX_BYTES = 1.5 * 1024 * 1024; // 1.5 MB
+const MAX_BYTES = 1.5 * 1024 * 1024;
 
 const SECURE_HEADERS = {
   'Content-Type': 'application/json',
@@ -23,7 +19,7 @@ const SECURE_HEADERS = {
   'Access-Control-Allow-Origin': '*',
 };
 
-// ── In-memory rate limiter (60 req/min per IP) ──────────────
+// ── Rate limiter (60 req/min per IP) ────────────────────────
 const rateMap = new Map();
 const RATE_WINDOW = 60_000;
 const RATE_MAX    = 60;
@@ -44,7 +40,6 @@ function rateOk(ip) {
   return entry.count <= RATE_MAX;
 }
 
-// ── Constant-time secret comparison ──────────────────────────
 function checkAuth(event) {
   const authHeader = (event.headers['authorization'] || '').trim();
   if (!authHeader.startsWith('Bearer ')) return false;
@@ -59,62 +54,64 @@ function checkAuth(event) {
   }
 }
 
-// ── GitHub HTTPS helpers ─────────────────────────────────────
-function ghRequest(method, path, body) {
-  return new Promise((resolve, reject) => {
-    const payload = body ? JSON.stringify(body) : null;
-    const options = {
-      hostname: 'api.github.com',
-      path: `/repos/${OWNER}/${REPO}/contents/${path}`,
-      method,
-      headers: {
-        'Authorization': `Bearer ${TOKEN}`,
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'gantt-netlify-function/1.0',
-        ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
-      },
-    };
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode, body: data }));
-    });
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
-
-async function getCurrentSha() {
-  const { status, body } = await ghRequest('GET', FILE_PATH);
-  if (status === 404) return null;
-  if (status !== 200) throw new Error(`GitHub GET returned ${status}`);
-  return JSON.parse(body).sha;
-}
-
-// ── Payload validation ───────────────────────────────────────
 function validatePayload(data) {
   if (!data || typeof data !== 'object') return 'Body must be a JSON object';
-  if (!Array.isArray(data.projects))     return 'projects must be an array';
+  if (!Array.isArray(data.projects)) return 'projects must be an array';
   if (data.users && !Array.isArray(data.users)) return 'users must be an array';
-
-  // Deep-scan for <script> injection
   const json = JSON.stringify(data);
   if (/<script[\s>]/i.test(json)) return 'Payload contains forbidden <script> tag';
-
   return null;
 }
 
-// ── Handler ───────────────────────────────────────────────────
+// ── Supabase REST helpers ───────────────────────────────────
+const sbHeaders = {
+  'apikey': '',
+  'Authorization': '',
+  'Content-Type': 'application/json',
+  'Prefer': 'return=minimal',
+};
+
+function initSbHeaders() {
+  sbHeaders['apikey'] = SUPABASE_SERVICE_KEY;
+  sbHeaders['Authorization'] = `Bearer ${SUPABASE_SERVICE_KEY}`;
+}
+
+async function sbRequest(method, table, query, body, extraHeaders) {
+  const url = `${SUPABASE_URL}/rest/v1/${table}${query ? '?' + query : ''}`;
+  const opts = {
+    method,
+    headers: { ...sbHeaders, ...(extraHeaders || {}) },
+  };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text();
+    throw new Error(`Supabase ${method} ${table} failed: ${res.status} ${text}`);
+  }
+  return res;
+}
+
+async function upsert(table, rows, conflictCols) {
+  if (!rows || rows.length === 0) return;
+  const headers = {
+    'Prefer': 'resolution=merge-duplicates,return=minimal',
+  };
+  if (conflictCols) {
+    headers['Prefer'] = `resolution=merge-duplicates,return=minimal`;
+  }
+  await sbRequest('POST', table, conflictCols ? `on_conflict=${conflictCols}` : '', rows, headers);
+}
+
+async function deleteWhere(table, query) {
+  await sbRequest('DELETE', table, query, undefined);
+}
+
 exports.handler = async (event) => {
-  // 1. CORS preflight
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
       headers: {
         ...SECURE_HEADERS,
-        'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       },
@@ -122,35 +119,29 @@ exports.handler = async (event) => {
     };
   }
 
-  // 2. Method guard
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Method Not Allowed' }) };
   }
 
-  // 3. Rate limit
   const ip = (event.headers['x-forwarded-for'] || event.headers['client-ip'] || 'unknown').split(',')[0].trim();
   if (!rateOk(ip)) {
     return { statusCode: 429, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Rate limit exceeded. Try again in 60 s.' }) };
   }
 
-  // 4. Auth
   if (!checkAuth(event)) {
     return { statusCode: 401, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
-  // 5. Env guard
-  if (!OWNER || !REPO || !TOKEN) {
-    console.error('[save-gantt] Missing environment variables');
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    console.error('[save-gantt] Missing Supabase env vars');
     return { statusCode: 500, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Server misconfiguration' }) };
   }
 
-  // 6. Size guard
   const rawLen = Buffer.byteLength(event.body || '', 'utf8');
   if (rawLen > MAX_BYTES) {
     return { statusCode: 413, headers: SECURE_HEADERS, body: JSON.stringify({ error: `Payload too large (${rawLen} bytes, max ${MAX_BYTES})` }) };
   }
 
-  // 7. Parse & validate
   let data;
   try {
     data = JSON.parse(event.body);
@@ -163,47 +154,107 @@ exports.handler = async (event) => {
     return { statusCode: 422, headers: SECURE_HEADERS, body: JSON.stringify({ error: validationError }) };
   }
 
-  // 8. Server-side metadata stamp
-  data._savedAt = new Date().toISOString();
-  data._savedBy = 'netlify-function';
+  initSbHeaders();
 
-  // 9. Atomic write via SHA
   try {
-    const sha = await getCurrentSha();
-    const content = Buffer.from(JSON.stringify(data, null, 2), 'utf8').toString('base64');
+    // ── 1. Upsert users ──────────────────────────────────────
+    const incomingUsers = (data.users || []).map(u => ({
+      name: u.name,
+      color: u.color || '#4f6ef7',
+    }));
+    if (incomingUsers.length > 0) {
+      await upsert('gantt_users', incomingUsers, 'name');
+    }
 
-    const putBody = {
-      message: `chore: update gantt state [${new Date().toISOString()}]`,
-      content,
-      branch: BRANCH,
+    // Delete orphaned users
+    const userNames = incomingUsers.map(u => u.name);
+    if (userNames.length > 0) {
+      await deleteWhere('gantt_users', `name=not.in.(${userNames.map(n => `"${n}"`).join(',')})`);
+    } else {
+      await deleteWhere('gantt_users', 'name=neq.___placeholder___');
+    }
+
+    // ── 2. Upsert projects ───────────────────────────────────
+    const incomingProjects = (data.projects || []).map((p, i) => ({
+      id: p.id,
+      name: p.name,
+      color: p.color || '#4f6ef7',
+      sort_order: i,
+    }));
+    if (incomingProjects.length > 0) {
+      await upsert('gantt_projects', incomingProjects, 'id');
+    }
+
+    // Delete orphaned projects (cascades to tasks and deps)
+    const projectIds = incomingProjects.map(p => p.id);
+    if (projectIds.length > 0) {
+      await deleteWhere('gantt_projects', `id=not.in.(${projectIds.map(id => `"${id}"`).join(',')})`);
+    } else {
+      await deleteWhere('gantt_projects', 'id=neq.___placeholder___');
+    }
+
+    // ── 3. Upsert tasks + delete orphans per project ─────────
+    for (const p of (data.projects || [])) {
+      const incomingTasks = (p.tasks || []).map((t, i) => ({
+        id: t.id,
+        project_id: p.id,
+        name: t.name,
+        start_date: t.startDate,
+        end_date: t.endDate || t.startDate,
+        assignee: t.assignee || null,
+        status: t.status || 'not_started',
+        notes: t.notes || '',
+        color_index: t.colorIndex ?? 0,
+        is_milestone: !!t.isMilestone,
+        sort_order: i,
+        last_edited_by: t.lastEditedBy || null,
+        last_edited_at: t.lastEditedAt ? new Date(t.lastEditedAt).toISOString() : null,
+      }));
+
+      if (incomingTasks.length > 0) {
+        await upsert('gantt_tasks', incomingTasks, 'id');
+      }
+
+      // Delete tasks no longer in this project
+      const taskIds = incomingTasks.map(t => t.id);
+      if (taskIds.length > 0) {
+        await deleteWhere('gantt_tasks', `project_id=eq.${p.id}&id=not.in.(${taskIds.map(id => `"${id}"`).join(',')})`);
+      } else {
+        await deleteWhere('gantt_tasks', `project_id=eq.${p.id}`);
+      }
+
+      // ── 4. Upsert dependencies + delete orphans ────────────
+      const incomingDeps = (p.dependencies || []).map(d => ({
+        project_id: p.id,
+        from_task: d.from,
+        to_task: d.to,
+      }));
+
+      // Delete all deps for this project first, then re-insert
+      // (simpler than tracking the serial id for upsert)
+      await deleteWhere('gantt_dependencies', `project_id=eq.${p.id}`);
+      if (incomingDeps.length > 0) {
+        await sbRequest('POST', 'gantt_dependencies', '', incomingDeps, { 'Prefer': 'return=minimal' });
+      }
+    }
+
+    // ── 5. Update settings ───────────────────────────────────
+    const settingsRow = {
+      id: 1,
+      active_project_id: data.activeProjectId || null,
+      view_mode: data.viewMode || 'monthly',
+      zoom_level: data.zoomLevel ?? 1,
     };
-    if (sha) putBody.sha = sha;
+    await upsert('gantt_settings', [settingsRow], 'id');
 
-    const { status, body } = await ghRequest('PUT', FILE_PATH, putBody);
-
-    if (status === 200 || status === 201) {
-      const ghResp = JSON.parse(body);
-      return {
-        statusCode: 200,
-        headers: SECURE_HEADERS,
-        body: JSON.stringify({ ok: true, sha: ghResp.content?.sha || null }),
-      };
-    }
-
-    if (status === 409 || status === 422) {
-      console.error('[save-gantt] Conflict', status);
-      return {
-        statusCode: 409,
-        headers: SECURE_HEADERS,
-        body: JSON.stringify({ error: 'Conflict – file was modified by another save. Please reload and try again.' }),
-      };
-    }
-
-    console.error('[save-gantt] GitHub PUT error', status, body);
-    return { statusCode: 502, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Upstream error' }) };
+    return {
+      statusCode: 200,
+      headers: SECURE_HEADERS,
+      body: JSON.stringify({ ok: true }),
+    };
 
   } catch (err) {
-    console.error('[save-gantt] Unexpected error:', err.message);
-    return { statusCode: 500, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Internal error' }) };
+    console.error('[save-gantt] Error:', err.message);
+    return { statusCode: 502, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Upstream error' }) };
   }
 };

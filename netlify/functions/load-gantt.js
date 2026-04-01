@@ -1,15 +1,12 @@
 // netlify/functions/load-gantt.js
 // GET /.netlify/functions/load-gantt
-// Returns the current gantt-state.json from GitHub, or {} if not yet created.
+// Queries Supabase tables and returns the assembled state blob.
 
 const crypto = require('crypto');
-const https  = require('https');
 
-const FILE_PATH   = process.env.GANTT_FILE_PATH || 'data/gantt-state.json';
-const OWNER       = process.env.GITHUB_OWNER;
-const REPO        = process.env.GITHUB_REPO;
-const TOKEN       = process.env.GITHUB_TOKEN;
-const API_SECRET  = process.env.GANTT_API_SECRET;
+const SUPABASE_URL         = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const API_SECRET           = process.env.GANTT_API_SECRET;
 
 const SECURE_HEADERS = {
   'Content-Type': 'application/json',
@@ -20,7 +17,6 @@ const SECURE_HEADERS = {
   'Access-Control-Allow-Origin': '*',
 };
 
-// ── Constant-time secret comparison ──────────────────────────
 function checkAuth(event) {
   const authHeader = (event.headers['authorization'] || '').trim();
   if (!authHeader.startsWith('Bearer ')) return false;
@@ -35,39 +31,28 @@ function checkAuth(event) {
   }
 }
 
-// ── Simple GitHub Contents API GET ───────────────────────────
-function githubGet(path) {
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'api.github.com',
-      path: `/repos/${OWNER}/${REPO}/contents/${path}`,
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${TOKEN}`,
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'gantt-netlify-function/1.0',
-      },
-    };
-    const req = https.request(options, (res) => {
-      let body = '';
-      res.on('data', (chunk) => { body += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode, body }));
-    });
-    req.on('error', reject);
-    req.end();
+async function supabaseGet(table, query = '') {
+  const url = `${SUPABASE_URL}/rest/v1/${table}?${query}`;
+  const res = await fetch(url, {
+    headers: {
+      'apikey': SUPABASE_SERVICE_KEY,
+      'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+      'Accept': 'application/json',
+    },
   });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Supabase GET ${table} failed: ${res.status} ${body}`);
+  }
+  return res.json();
 }
 
-// ── Handler ───────────────────────────────────────────────────
 exports.handler = async (event) => {
-  // 1. CORS preflight
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
       headers: {
         ...SECURE_HEADERS,
-        'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       },
@@ -75,50 +60,72 @@ exports.handler = async (event) => {
     };
   }
 
-  // 2. Method guard
   if (event.httpMethod !== 'GET') {
     return { statusCode: 405, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Method Not Allowed' }) };
   }
 
-  // 2. Auth
   if (!checkAuth(event)) {
     return { statusCode: 401, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
-  // 3. Env guard
-  if (!OWNER || !REPO || !TOKEN) {
-    console.error('[load-gantt] Missing environment variables');
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    console.error('[load-gantt] Missing Supabase env vars');
     return { statusCode: 500, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Server misconfiguration' }) };
   }
 
-  // 4. Fetch from GitHub
   try {
-    const { status, body } = await githubGet(FILE_PATH);
+    const [users, projects, tasks, deps, settingsRows] = await Promise.all([
+      supabaseGet('gantt_users', 'order=name.asc'),
+      supabaseGet('gantt_projects', 'order=sort_order.asc,created_at.asc'),
+      supabaseGet('gantt_tasks', 'order=sort_order.asc,created_at.asc'),
+      supabaseGet('gantt_dependencies'),
+      supabaseGet('gantt_settings', 'id=eq.1'),
+    ]);
 
-    if (status === 404) {
-      // File doesn't exist yet — return empty-but-valid state
-      return { statusCode: 200, headers: SECURE_HEADERS, body: JSON.stringify({ projects: [], users: [] }) };
+    const settings = settingsRows[0] || {};
+
+    const tasksByProject = {};
+    for (const t of tasks) {
+      if (!tasksByProject[t.project_id]) tasksByProject[t.project_id] = [];
+      tasksByProject[t.project_id].push({
+        id: t.id,
+        name: t.name,
+        startDate: t.start_date,
+        endDate: t.end_date,
+        assignee: t.assignee || null,
+        status: t.status,
+        notes: t.notes || '',
+        colorIndex: t.color_index ?? 0,
+        isMilestone: !!t.is_milestone,
+        lastEditedBy: t.last_edited_by || null,
+        lastEditedAt: t.last_edited_at ? new Date(t.last_edited_at).getTime() : null,
+      });
     }
 
-    if (status !== 200) {
-      console.error('[load-gantt] GitHub API error', status);
-      return { statusCode: 502, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Upstream error' }) };
+    const depsByProject = {};
+    for (const d of deps) {
+      if (!depsByProject[d.project_id]) depsByProject[d.project_id] = [];
+      depsByProject[d.project_id].push({ from: d.from_task, to: d.to_task });
     }
 
-    const ghResponse = JSON.parse(body);
-    const decoded    = Buffer.from(ghResponse.content, 'base64').toString('utf8');
-    const data       = JSON.parse(decoded);
+    const assembled = {
+      users: users.map(u => ({ name: u.name, color: u.color })),
+      projects: projects.map(p => ({
+        id: p.id,
+        name: p.name,
+        color: p.color,
+        tasks: tasksByProject[p.id] || [],
+        dependencies: depsByProject[p.id] || [],
+      })),
+      activeProjectId: settings.active_project_id || null,
+      viewMode: settings.view_mode || 'monthly',
+      zoomLevel: settings.zoom_level != null ? Number(settings.zoom_level) : 1,
+    };
 
-    // 5. Minimal schema check before returning
-    if (!data || typeof data !== 'object' || !Array.isArray(data.projects)) {
-      console.error('[load-gantt] Corrupt state in GitHub');
-      return { statusCode: 500, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Corrupt state' }) };
-    }
-
-    return { statusCode: 200, headers: SECURE_HEADERS, body: JSON.stringify(data) };
+    return { statusCode: 200, headers: SECURE_HEADERS, body: JSON.stringify(assembled) };
 
   } catch (err) {
-    console.error('[load-gantt] Unexpected error:', err.message);
-    return { statusCode: 500, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Internal error' }) };
+    console.error('[load-gantt] Error:', err.message);
+    return { statusCode: 502, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Upstream error' }) };
   }
 };
