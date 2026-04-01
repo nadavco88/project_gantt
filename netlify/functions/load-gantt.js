@@ -1,138 +1,124 @@
-'use strict';
+// netlify/functions/load-gantt.js
+// GET /.netlify/functions/load-gantt
+// Returns the current gantt-state.json from GitHub, or {} if not yet created.
 
 const crypto = require('crypto');
+const https  = require('https');
 
-function json(statusCode, body) {
-  return {
-    statusCode,
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Authorization, Content-Type'
-    },
-    body: JSON.stringify(body)
-  };
-}
+const FILE_PATH   = process.env.GANTT_FILE_PATH || 'data/gantt-state.json';
+const OWNER       = process.env.GITHUB_OWNER;
+const REPO        = process.env.GITHUB_REPO;
+const TOKEN       = process.env.GITHUB_TOKEN;
+const API_SECRET  = process.env.GANTT_API_SECRET;
 
-function verifyBearer(event) {
-  const secret = process.env.GANTT_API_SECRET;
-  if (!secret || typeof secret !== 'string') return false;
-  const h = event.headers.authorization || event.headers.Authorization || '';
-  const m = /^Bearer\s+(\S+)$/i.exec(String(h).trim());
-  if (!m) return false;
+const SECURE_HEADERS = {
+  'Content-Type': 'application/json',
+  'Cache-Control': 'no-store, no-cache, must-revalidate',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Strict-Transport-Security': 'max-age=63072000; includeSubDomains',
+  'Access-Control-Allow-Origin': '*',
+};
+
+// ── Constant-time secret comparison ──────────────────────────
+function checkAuth(event) {
+  const authHeader = (event.headers['authorization'] || '').trim();
+  if (!authHeader.startsWith('Bearer ')) return false;
+  const provided = authHeader.slice(7);
   try {
-    const a = crypto.createHash('sha256').update(m[1], 'utf8').digest();
-    const b = crypto.createHash('sha256').update(secret, 'utf8').digest();
+    const a = Buffer.from(provided.padEnd(64));
+    const b = Buffer.from(API_SECRET.padEnd(64));
+    if (a.length !== b.length) return false;
     return crypto.timingSafeEqual(a, b);
   } catch {
     return false;
   }
 }
 
-function githubContentsPath(path) {
-  return path
-    .split('/')
-    .filter(Boolean)
-    .map(encodeURIComponent)
-    .join('/');
+// ── Simple GitHub Contents API GET ───────────────────────────
+function githubGet(path) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.github.com',
+      path: `/repos/${OWNER}/${REPO}/contents/${path}`,
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${TOKEN}`,
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'gantt-netlify-function/1.0',
+      },
+    };
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
 }
 
-function emptyState() {
-  return {
-    users: [],
-    projects: [],
-    activeProjectId: null,
-    activeUser: null,
-    viewMode: 'monthly',
-    zoomLevel: 1
-  };
-}
-
-function validateLoaded(obj) {
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
-  if (!Array.isArray(obj.projects)) return false;
-  if (obj.users != null && !Array.isArray(obj.users)) return false;
-  for (const p of obj.projects) {
-    if (!p || typeof p !== 'object' || typeof p.id !== 'string' || !Array.isArray(p.tasks)) return false;
-  }
-  return true;
-}
-
-exports.handler = async function (event) {
+// ── Handler ───────────────────────────────────────────────────
+exports.handler = async (event) => {
+  // 1. CORS preflight
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
       headers: {
+        ...SECURE_HEADERS,
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': 'Authorization, Content-Type'
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       },
-      body: ''
+      body: '',
     };
   }
 
+  // 2. Method guard
   if (event.httpMethod !== 'GET') {
-    return json(405, { error: 'Method not allowed' });
+    return { statusCode: 405, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Method Not Allowed' }) };
   }
 
-  if (!verifyBearer(event)) {
-    return json(401, { error: 'Unauthorized' });
+  // 2. Auth
+  if (!checkAuth(event)) {
+    return { statusCode: 401, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
-  const owner = process.env.GITHUB_OWNER;
-  const repo = process.env.GITHUB_REPO;
-  const ghToken = process.env.GITHUB_TOKEN;
-  const filePath = process.env.GANTT_FILE_PATH || 'data/gantt-state.json';
-
-  if (!owner || !repo || !ghToken) {
-    return json(500, { error: 'Server misconfigured' });
+  // 3. Env guard
+  if (!OWNER || !REPO || !TOKEN) {
+    console.error('[load-gantt] Missing environment variables');
+    return { statusCode: 500, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Server misconfiguration' }) };
   }
 
-  const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${githubContentsPath(filePath)}`;
-
-  let res;
+  // 4. Fetch from GitHub
   try {
-    res = await fetch(apiUrl, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${ghToken}`,
-        'X-GitHub-Api-Version': '2022-11-28'
-      }
-    });
-  } catch {
-    return json(502, { error: 'Upstream request failed' });
-  }
+    const { status, body } = await githubGet(FILE_PATH);
 
-  if (res.status === 404) {
-    return json(200, emptyState());
-  }
+    if (status === 404) {
+      // File doesn't exist yet — return empty-but-valid state
+      return { statusCode: 200, headers: SECURE_HEADERS, body: JSON.stringify({ projects: [], users: [] }) };
+    }
 
-  if (!res.ok) {
-    return json(502, { error: 'GitHub request failed' });
-  }
+    if (status !== 200) {
+      console.error('[load-gantt] GitHub API error', status);
+      return { statusCode: 502, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Upstream error' }) };
+    }
 
-  let meta;
-  try {
-    meta = await res.json();
-  } catch {
-    return json(502, { error: 'Invalid GitHub response' });
-  }
+    const ghResponse = JSON.parse(body);
+    const decoded    = Buffer.from(ghResponse.content, 'base64').toString('utf8');
+    const data       = JSON.parse(decoded);
 
-  if (!meta.content || typeof meta.content !== 'string') {
-    return json(502, { error: 'Invalid file metadata' });
-  }
+    // 5. Minimal schema check before returning
+    if (!data || typeof data !== 'object' || !Array.isArray(data.projects)) {
+      console.error('[load-gantt] Corrupt state in GitHub');
+      return { statusCode: 500, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Corrupt state' }) };
+    }
 
-  let parsed;
-  try {
-    const text = Buffer.from(meta.content.replace(/\s/g, ''), 'base64').toString('utf8');
-    parsed = JSON.parse(text);
-  } catch {
-    return json(502, { error: 'Invalid stored JSON' });
-  }
+    return { statusCode: 200, headers: SECURE_HEADERS, body: JSON.stringify(data) };
 
-  if (!validateLoaded(parsed)) {
-    return json(502, { error: 'Invalid stored schema' });
+  } catch (err) {
+    console.error('[load-gantt] Unexpected error:', err.message);
+    return { statusCode: 500, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Internal error' }) };
   }
-
-  return json(200, parsed);
 };
