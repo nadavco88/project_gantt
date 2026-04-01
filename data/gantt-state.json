@@ -1,1 +1,67 @@
-{"projects":[],"users":[]}
+{
+  "users": [
+    {
+      "name": "Bob",
+      "color": "#f59e42"
+    },
+    {
+      "name": "Carol",
+      "color": "#36b37e"
+    },
+    {
+      "name": "David",
+      "color": "#8b5cf6"
+    },
+    {
+      "name": "Eva",
+      "color": "#e05263"
+    },
+    {
+      "name": "Nadav",
+      "color": "#e6a019"
+    }
+  ],
+  "projects": [
+    {
+      "id": "ugaa6pcpi",
+      "name": "oncofertility",
+      "color": "#4f6ef7",
+      "tasks": [
+        {
+          "id": "51bva6lfe",
+          "name": "Write the protocol",
+          "startDate": "2026-03-31",
+          "endDate": "2026-04-12",
+          "assignee": "Nadav",
+          "status": "in_progress",
+          "notes": "",
+          "colorIndex": 0,
+          "isMilestone": false,
+          "lastEditedBy": "Alice",
+          "lastEditedAt": 1774981829278
+        }
+      ],
+      "dependencies": []
+    },
+    {
+      "id": "fbxwkn7bz",
+      "name": "test 1",
+      "color": "#f59e42",
+      "tasks": [],
+      "dependencies": []
+    },
+    {
+      "id": "ghbrua9pu",
+      "name": "test 22",
+      "color": "#36b37e",
+      "tasks": [],
+      "dependencies": []
+    }
+  ],
+  "activeProjectId": "ugaa6pcpi",
+  "activeUser": "Nadav",
+  "viewMode": "monthly",
+  "zoomLevel": 1,
+  "_savedAt": "2026-04-01T19:05:45.375Z",
+  "_savedBy": "netlify-function"
+}
