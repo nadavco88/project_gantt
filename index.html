@@ -4,7 +4,7 @@
   - Netlify Drop: drag this file to netlify.com/drop — live in seconds, no account needed
   - Vercel / Cloudflare Pages: connect repo or drag-and-drop, free tier available
   - Netlify + GitHub: set env GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GANTT_API_SECRET; optional GANTT_FILE_PATH
-    (default data/gantt-state.json). Editors use Export > Remote (GitHub)…; API secret in sessionStorage only.
+    (default data/gantt-state.json). Editors use Export > Remote (GitHub)…; API secret stored in localStorage on that browser after first paste.
 -->
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
@@ -531,10 +531,10 @@ function storageSet(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){
 
 // ─── Remote (GitHub via Netlify Functions) ─────────────────
 function getRemoteApiSecret(){
-  try{return sessionStorage.getItem(SK.remoteApi)||''}catch(e){return ''}
+  try{return localStorage.getItem(SK.remoteApi)||''}catch(e){return ''}
 }
 function setRemoteApiSecret(sec){
-  try{if(sec)sessionStorage.setItem(SK.remoteApi,sec);else sessionStorage.removeItem(SK.remoteApi)}catch(e){}
+  try{if(sec)localStorage.setItem(SK.remoteApi,sec);else localStorage.removeItem(SK.remoteApi)}catch(e){}
 }
 function remoteAuthHeaders(){
   const t=getRemoteApiSecret();return t?{Authorization:'Bearer '+t}:{};
@@ -586,7 +586,7 @@ async function pushRemoteState(){
   remoteSaveInFlight=true;
   try{
     const r=await fetch(REMOTE_SAVE,{method:'POST',headers:Object.assign({'Content-Type':'application/json'},remoteAuthHeaders()),body});
-    if(r.status===401){setRemoteApiSecret('');showToast('Remote: session unauthorized');return false}
+    if(r.status===401){setRemoteApiSecret('');showToast('Remote: invalid API secret');return false}
     if(r.status===413){showToast('Payload too large');return false}
     if(r.status===409){showToast('Remote conflict — reload from GitHub');return false}
     if(!r.ok){showToast('Remote save failed');return false}
@@ -686,7 +686,9 @@ async function loadState(){
         saveLocalOnly();
         return;
       }
-    }catch(e){}
+    }catch(e){
+      showToast('Could not load from GitHub — using local data. Check deploy and secret.');
+    }
   }
   applyLocalOrSample();
 }
@@ -1635,7 +1637,7 @@ function showInputModal(title,msg,defaultVal,btnText,onConfirm){
 
 function showRemoteSyncModal(){
   const connected=!!getRemoteApiSecret();
-  showModal(`<h3>Remote storage (GitHub)</h3><p>Enter the API secret from your Netlify environment (<code>GANTT_API_SECRET</code>). It is stored in <strong>session storage</strong> until you close the tab. Never commit this secret.</p>${connected?'<p style="font-size:12px;color:var(--text-secondary)">Session: connected</p>':''}<input type="password" class="modal-input" id="modal-remote-secret" placeholder="API secret" autocomplete="off"><div id="modal-actions" style="flex-wrap:wrap;gap:8px"><button class="modal-cancel" id="mc-cancel">Close</button>${connected?'<button class="modal-danger" id="mc-disconnect">Disconnect</button>':''}<button class="modal-confirm" id="mc-load">Load from GitHub</button><button class="modal-confirm" id="mc-save">Save to GitHub now</button></div>`);
+  showModal(`<h3>Remote storage (GitHub)</h3><p>Paste the same API secret as in Netlify (<code>GANTT_API_SECRET</code>). It is saved in <strong>this browser local storage</strong> (once per device) so edits sync to GitHub and other machines can load them. Each new device must enter the secret once. Use <strong>Disconnect</strong> to remove it from this browser.</p>${connected?'<p style="font-size:12px;color:var(--text-secondary)">Cloud sync: on (this browser)</p>':''}<input type="password" class="modal-input" id="modal-remote-secret" placeholder="API secret" autocomplete="off"><div id="modal-actions" style="flex-wrap:wrap;gap:8px"><button class="modal-cancel" id="mc-cancel">Close</button>${connected?'<button class="modal-danger" id="mc-disconnect">Disconnect</button>':''}<button class="modal-confirm" id="mc-load">Load from GitHub</button><button class="modal-confirm" id="mc-save">Save to GitHub now</button></div>`);
   document.getElementById('mc-cancel').addEventListener('click',closeModal);
   const disc=document.getElementById('mc-disconnect');
   if(disc)disc.addEventListener('click',()=>{setRemoteApiSecret('');closeModal();showToast('Remote disconnected');updateRemoteMenuLabel();});
