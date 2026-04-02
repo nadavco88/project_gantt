@@ -1,12 +1,10 @@
 // netlify/functions/save-gantt.js
 // POST /.netlify/functions/save-gantt
 // Validates the state blob and upserts/deletes rows in Supabase.
-
-const crypto = require('crypto');
+// Publicly accessible — rate-limited but no auth required.
 
 const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const API_SECRET           = process.env.GANTT_API_SECRET;
 
 const MAX_BYTES = 1.5 * 1024 * 1024;
 
@@ -38,20 +36,6 @@ function rateOk(ip) {
   }
   entry.count += 1;
   return entry.count <= RATE_MAX;
-}
-
-function checkAuth(event) {
-  const authHeader = (event.headers['authorization'] || '').trim();
-  if (!authHeader.startsWith('Bearer ')) return false;
-  const provided = authHeader.slice(7);
-  try {
-    const a = Buffer.from(provided.padEnd(64));
-    const b = Buffer.from(API_SECRET.padEnd(64));
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
-  } catch {
-    return false;
-  }
 }
 
 function validatePayload(data) {
@@ -96,9 +80,6 @@ async function upsert(table, rows, conflictCols) {
   const headers = {
     'Prefer': 'resolution=merge-duplicates,return=minimal',
   };
-  if (conflictCols) {
-    headers['Prefer'] = `resolution=merge-duplicates,return=minimal`;
-  }
   await sbRequest('POST', table, conflictCols ? `on_conflict=${conflictCols}` : '', rows, headers);
 }
 
@@ -113,7 +94,7 @@ exports.handler = async (event) => {
       headers: {
         ...SECURE_HEADERS,
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Headers': 'Content-Type',
       },
       body: '',
     };
@@ -126,10 +107,6 @@ exports.handler = async (event) => {
   const ip = (event.headers['x-forwarded-for'] || event.headers['client-ip'] || 'unknown').split(',')[0].trim();
   if (!rateOk(ip)) {
     return { statusCode: 429, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Rate limit exceeded. Try again in 60 s.' }) };
-  }
-
-  if (!checkAuth(event)) {
-    return { statusCode: 401, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
@@ -157,7 +134,6 @@ exports.handler = async (event) => {
   initSbHeaders();
 
   try {
-    // ── 1. Upsert users ──────────────────────────────────────
     const incomingUsers = (data.users || []).map(u => ({
       name: u.name,
       color: u.color || '#4f6ef7',
@@ -166,7 +142,6 @@ exports.handler = async (event) => {
       await upsert('gantt_users', incomingUsers, 'name');
     }
 
-    // Delete orphaned users
     const userNames = incomingUsers.map(u => u.name);
     if (userNames.length > 0) {
       await deleteWhere('gantt_users', `name=not.in.(${userNames.map(n => `"${n}"`).join(',')})`);
@@ -174,7 +149,6 @@ exports.handler = async (event) => {
       await deleteWhere('gantt_users', 'name=neq.___placeholder___');
     }
 
-    // ── 2. Upsert projects ───────────────────────────────────
     const incomingProjects = (data.projects || []).map((p, i) => ({
       id: p.id,
       name: p.name,
@@ -185,7 +159,6 @@ exports.handler = async (event) => {
       await upsert('gantt_projects', incomingProjects, 'id');
     }
 
-    // Delete orphaned projects (cascades to tasks and deps)
     const projectIds = incomingProjects.map(p => p.id);
     if (projectIds.length > 0) {
       await deleteWhere('gantt_projects', `id=not.in.(${projectIds.map(id => `"${id}"`).join(',')})`);
@@ -193,7 +166,6 @@ exports.handler = async (event) => {
       await deleteWhere('gantt_projects', 'id=neq.___placeholder___');
     }
 
-    // ── 3. Upsert tasks + delete orphans per project ─────────
     for (const p of (data.projects || [])) {
       const incomingTasks = (p.tasks || []).map((t, i) => ({
         id: t.id,
@@ -215,7 +187,6 @@ exports.handler = async (event) => {
         await upsert('gantt_tasks', incomingTasks, 'id');
       }
 
-      // Delete tasks no longer in this project
       const taskIds = incomingTasks.map(t => t.id);
       if (taskIds.length > 0) {
         await deleteWhere('gantt_tasks', `project_id=eq.${p.id}&id=not.in.(${taskIds.map(id => `"${id}"`).join(',')})`);
@@ -223,22 +194,18 @@ exports.handler = async (event) => {
         await deleteWhere('gantt_tasks', `project_id=eq.${p.id}`);
       }
 
-      // ── 4. Upsert dependencies + delete orphans ────────────
       const incomingDeps = (p.dependencies || []).map(d => ({
         project_id: p.id,
         from_task: d.from,
         to_task: d.to,
       }));
 
-      // Delete all deps for this project first, then re-insert
-      // (simpler than tracking the serial id for upsert)
       await deleteWhere('gantt_dependencies', `project_id=eq.${p.id}`);
       if (incomingDeps.length > 0) {
         await sbRequest('POST', 'gantt_dependencies', '', incomingDeps, { 'Prefer': 'return=minimal' });
       }
     }
 
-    // ── 5. Update settings ───────────────────────────────────
     const settingsRow = {
       id: 1,
       active_project_id: data.activeProjectId || null,

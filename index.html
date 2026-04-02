@@ -1,11 +1,8 @@
 <!--
-  Deployment options:
-  - GitHub Pages: push as index.html to main branch, enable Pages in Settings > Pages > Source: main / root
-  - Netlify Drop: drag this file to netlify.com/drop — live in seconds, no account needed
-  - Vercel / Cloudflare Pages: connect repo or drag-and-drop, free tier available
-  - Netlify + Supabase: set env SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY, GANTT_API_SECRET.
-    Paste GANTT_API_SECRET in Export → Remote… (sessionStorage per tab).
-    Supabase Realtime provides live sync between tabs/machines.
+  Deployment: Netlify + Supabase.
+  Set Netlify env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+  Set SUPABASE_URL and SUPABASE_ANON_KEY in the JS constants below.
+  Functions are publicly accessible (rate-limited). Supabase Realtime provides live sync.
 -->
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
@@ -55,8 +52,8 @@ html,body{height:100%;overflow:hidden;font-family:'Inter',system-ui,-apple-syste
   background:var(--bg-primary);color:var(--text-primary);transition:background .25s,color .25s}
 body{display:flex;flex-direction:column}
 body.storage-loading{pointer-events:none;opacity:.94}
-.github-sync-indicator{position:fixed;top:0;left:0;right:0;z-index:9999;text-align:center;padding:8px 12px;font-size:13px;font-weight:500;background:var(--accent);color:#fff;box-shadow:var(--shadow-lg)}
-.github-sync-indicator[hidden]{display:none!important}
+.sync-indicator{position:fixed;top:0;left:0;right:0;z-index:9999;text-align:center;padding:8px 12px;font-size:13px;font-weight:500;background:var(--accent);color:#fff;box-shadow:var(--shadow-lg)}
+.sync-indicator[hidden]{display:none!important}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:var(--scrollbar-track)}
 ::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:4px}
@@ -385,7 +382,6 @@ input[type="file"]{display:none}
             <button class="export-option" id="btn-export-png"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="2" width="10" height="10" rx="2"/><circle cx="5" cy="5.5" r="1.2"/><path d="M2 10l3-3 2 2 3-4 2 3"/></svg> Export as PNG</button>
             <button class="export-option" id="btn-export-json"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 2H3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1h-1"/><rect x="4.5" y="1" width="5" height="3" rx="1"/></svg> Export as JSON</button>
             <button class="export-option" id="btn-import-json"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 5.5v-3h8v3"/><polyline points="5.5 8.5 7 6.5 8.5 8.5"/><line x1="7" y1="12" x2="7" y2="6.5"/></svg> Import JSON</button>
-            <button class="export-option" id="btn-remote-sync"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><ellipse cx="7" cy="4" rx="3" ry="1.8"/><path d="M4 4v3c0 1.2 1.3 2.2 3 2.2s3-1 3-2.2V4"/><path d="M4 7v3c0 1.2 1.3 2.2 3 2.2"/></svg> Remote (Supabase)…</button>
           </div>
         </div>
         <button class="tb-btn" id="btn-shortcuts" title="Keyboard shortcuts"><kbd style="font-size:13px;font-weight:700;padding:0 2px">?</kbd></button>
@@ -422,7 +418,7 @@ input[type="file"]{display:none}
 
 <div id="modal-overlay"><div id="modal-box"></div></div>
 <div id="float-label"></div>
-<div id="github-sync-indicator" class="github-sync-indicator" hidden aria-live="polite"></div>
+<div id="sync-indicator" class="sync-indicator" hidden aria-live="polite"></div>
 <div id="toast"></div>
 <div class="bar-tooltip" id="bar-tooltip"></div>
 <input type="file" id="json-file-input" accept=".json">
@@ -457,13 +453,13 @@ input[type="file"]{display:none}
  * }
  */
 
-const SK = { data:'gantt_projects', theme:'gantt_theme', user:'gantt_active_user', remoteApi:'gantt_remote_api_secret' };
+const SK = { theme:'gantt_theme' };
 const REMOTE_LOAD = '/.netlify/functions/load-gantt';
 const REMOTE_SAVE = '/.netlify/functions/save-gantt';
 
 // Supabase Realtime — anon key is safe in browser (read-only subscriptions via RLS)
-const SUPABASE_URL      = 'https://your-project-ref.supabase.co';  // TODO: replace with your Supabase project URL
-const SUPABASE_ANON_KEY = 'your-anon-key';                         // TODO: replace with your Supabase anon public key
+const SUPABASE_URL      = 'https://rlrvmousccagbofvrvqu.supabase.co';  // TODO: replace with your Supabase project URL
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJscnZtb3VzY2NhZ2JvZnZydnF1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUwNjI5MjAsImV4cCI6MjA5MDYzODkyMH0.ux8u89Pk4OsQvr0MJ9G6FQ0Avzia00Dzu-7JN30VKxU';                         // TODO: replace with your Supabase anon public key
 const MAX_REMOTE_BYTES = Math.floor(1.45 * 1024 * 1024);
 const REMOTE_SAVE_DEBOUNCE_MS = 500;
 
@@ -538,24 +534,15 @@ function darkenColor(hex,amt){
   return '#'+(r<16?'0':'')+r.toString(16)+(g<16?'0':'')+g.toString(16)+(b<16?'0':'')+b.toString(16);
 }
 
-// ─── localStorage (Gantt cache; theme below) ─────────────────
+// ─── localStorage (theme preference only) ───────────────────
 function storageGet(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null}catch(e){return null}}
 function storageSet(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 
 // ─── Remote (Supabase via Netlify Functions) ────────────────
 // SUPABASE_SERVICE_ROLE_KEY never ships to the browser. Set it in Netlify env only.
-// GANTT_API_SECRET is entered in Export → Remote (Supabase)… and kept in sessionStorage.
-function getRemoteApiSecret(){
-  try{return sessionStorage.getItem(SK.remoteApi)||''}catch(e){return ''}
-}
-function setRemoteApiSecret(sec){
-  try{if(sec)sessionStorage.setItem(SK.remoteApi,sec);else sessionStorage.removeItem(SK.remoteApi)}catch(e){}
-}
-function remoteAuthHeaders(){
-  const t=getRemoteApiSecret();return t?{Authorization:'Bearer '+t}:{};
-}
-function setGithubSyncIndicator(mode, msg){
-  const el = document.getElementById('github-sync-indicator');
+// Functions are publicly accessible; rate-limited on the server side.
+function setSyncIndicator(mode, msg){
+  const el = document.getElementById('sync-indicator');
   if (!el) return;
   if (mode === 'hidden') {
     el.hidden = true;
@@ -589,21 +576,14 @@ function mergeRemoteIntoState(d){
   if(!state.activeProjectId&&state.projects.length>0)state.activeProjectId=state.projects[0].id;
 }
 function saveLocalOnly(){
-  storageSet(SK.data,state);
-  storageSet(SK.user,state.activeUser);
   queueRemoteSave();
 }
-function remoteSnapshotIsEmpty(d){
-  return d&&(!d.projects||d.projects.length===0)&&(!d.users||d.users.length===0);
-}
 async function fetchRemoteState(){
-  const r=await fetch(REMOTE_LOAD,{headers:Object.assign({'Accept':'application/json'},remoteAuthHeaders())});
-  if(r.status===401){setRemoteApiSecret('');throw new Error('unauthorized')}
+  const r=await fetch(REMOTE_LOAD,{headers:{'Accept':'application/json'}});
   if(!r.ok)throw new Error('load failed');
   return r.json();
 }
 function queueRemoteSave(){
-  if(!getRemoteApiSecret())return;
   clearTimeout(remoteSaveTimer);
   remoteSaveTimer=setTimeout(()=>{void pushRemoteState({silent:true})},REMOTE_SAVE_DEBOUNCE_MS);
 }
@@ -611,17 +591,15 @@ async function pushRemoteState(opts){
   opts=opts||{};
   const keepalive=!!opts.keepalive;
   const silent=opts.silent!==void 0?opts.silent:keepalive;
-  const sec=getRemoteApiSecret();
-  if(!sec||!state)return false;
+  if(!state)return false;
   const body=JSON.stringify(serializeStateForRemote());
   if(body.length>MAX_REMOTE_BYTES){if(!silent)showToast('Data too large for remote save');return false}
   if(remoteSaveInFlight&&!keepalive)return false;
   remoteSaveInFlight=true;
   _lastLocalSaveTs=Date.now();
-  if(!silent&&!keepalive)setGithubSyncIndicator('saving','Saving…');
+  if(!silent&&!keepalive)setSyncIndicator('saving','Saving…');
   try{
-    const r=await fetch(REMOTE_SAVE,Object.assign({method:'POST',headers:Object.assign({'Content-Type':'application/json'},remoteAuthHeaders()),body},keepalive?{keepalive:true}:{}));
-    if(r.status===401){setRemoteApiSecret('');if(!silent)showToast('Remote: invalid API secret');return false}
+    const r=await fetch(REMOTE_SAVE,Object.assign({method:'POST',headers:{'Content-Type':'application/json'},body},keepalive?{keepalive:true}:{}));
     if(r.status===413){if(!silent)showToast('Payload too large');return false}
     if(r.status===409){if(!silent)showToast('Remote conflict — reload and try again');return false}
     if(!r.ok){if(!silent)showToast('Remote save failed');return false}
@@ -631,11 +609,11 @@ async function pushRemoteState(opts){
     return false;
   }finally{
     remoteSaveInFlight=false;
-    if(!silent&&!keepalive)setGithubSyncIndicator('hidden');
+    if(!silent&&!keepalive)setSyncIndicator('hidden');
   }
 }
 function flushRemoteOnExit(){
-  if(!getRemoteApiSecret()||!state)return;
+  if(!state)return;
   clearTimeout(remoteSaveTimer);
   remoteSaveTimer=null;
   void pushRemoteState({keepalive:true,silent:true});
@@ -659,112 +637,47 @@ function setupRealtimeSync(){
   tables.forEach(table => {
     channel = channel.on('postgres_changes', { event: '*', schema: 'public', table }, () => {
       if(Date.now() - _lastLocalSaveTs < SELF_ECHO_WINDOW) return;
-      if(!getRemoteApiSecret()) return;
       fetchRemoteState().then(data => {
         if(!validateRemotePayload(data)) return;
         mergeRemoteIntoState(data);
-        saveLocalOnly();
         render();
-        setGithubSyncIndicator('loading','Updated by another user');
-        setTimeout(() => setGithubSyncIndicator('hidden'), 2000);
+        setSyncIndicator('loading','Updated by another user');
+        setTimeout(() => setSyncIndicator('hidden'), 2000);
       }).catch(() => {});
     });
   });
   channel.subscribe();
 }
 
-// ─── Sample data ────────────────────────────────────────────
-function createSampleData(){
-  const t = today();
+// ─── State management ───────────────────────────────────────
+function createEmptyState(){
   return {
     users:DEFAULT_USERS.map(u=>({name:u.name,color:u.color})),
-    projects:[
-      {id:uid(),name:'Website Redesign',color:'#4f6ef7',tasks:[
-        {id:uid(),name:'Discovery & Research',startDate:fmtDate(addDays(t,-56)),endDate:fmtDate(addDays(t,-45)),assignee:'Alice',status:'done',notes:'',colorIndex:0,isMilestone:false,lastEditedBy:'Alice',lastEditedAt:Date.now()-864e5*30},
-        {id:uid(),name:'Wireframes',startDate:fmtDate(addDays(t,-44)),endDate:fmtDate(addDays(t,-31)),assignee:'Bob',status:'done',notes:'',colorIndex:1,isMilestone:false,lastEditedBy:'Bob',lastEditedAt:Date.now()-864e5*20},
-        {id:uid(),name:'UI Design',startDate:fmtDate(addDays(t,-30)),endDate:fmtDate(addDays(t,-12)),assignee:'Carol',status:'done',notes:'',colorIndex:2,isMilestone:false,lastEditedBy:'Carol',lastEditedAt:Date.now()-864e5*10},
-        {id:uid(),name:'Frontend Development',startDate:fmtDate(addDays(t,-14)),endDate:fmtDate(addDays(t,12)),assignee:'David',status:'in_progress',notes:'React + Tailwind',colorIndex:3,isMilestone:false,lastEditedBy:'David',lastEditedAt:Date.now()-36e5*4},
-        {id:uid(),name:'Backend API',startDate:fmtDate(addDays(t,-14)),endDate:fmtDate(addDays(t,5)),assignee:'Eva',status:'in_progress',notes:'',colorIndex:4,isMilestone:false,lastEditedBy:'Eva',lastEditedAt:Date.now()-36e5*8},
-        {id:uid(),name:'QA Testing',startDate:fmtDate(addDays(t,8)),endDate:fmtDate(addDays(t,19)),assignee:'Alice',status:'not_started',notes:'',colorIndex:5,isMilestone:false,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Content Migration',startDate:fmtDate(addDays(t,14)),endDate:fmtDate(addDays(t,25)),assignee:'Bob',status:'not_started',notes:'',colorIndex:6,isMilestone:false,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Launch',startDate:fmtDate(addDays(t,28)),endDate:fmtDate(addDays(t,28)),assignee:null,status:'not_started',notes:'Go live!',colorIndex:7,isMilestone:true,lastEditedBy:null,lastEditedAt:null}
-      ],dependencies:[]},
-      {id:uid(),name:'Product Launch',color:'#f59e42',tasks:[
-        {id:uid(),name:'Market Research',startDate:fmtDate(addDays(t,-14)),endDate:fmtDate(addDays(t,-3)),assignee:'Carol',status:'done',notes:'',colorIndex:0,isMilestone:false,lastEditedBy:'Carol',lastEditedAt:Date.now()-864e5*5},
-        {id:uid(),name:'Pricing Strategy',startDate:fmtDate(addDays(t,-7)),endDate:fmtDate(addDays(t,5)),assignee:'David',status:'in_progress',notes:'',colorIndex:1,isMilestone:false,lastEditedBy:'David',lastEditedAt:Date.now()-36e5*2},
-        {id:uid(),name:'Marketing Materials',startDate:fmtDate(addDays(t,3)),endDate:fmtDate(addDays(t,19)),assignee:'Alice',status:'not_started',notes:'',colorIndex:2,isMilestone:false,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Beta Testing',startDate:fmtDate(addDays(t,8)),endDate:fmtDate(addDays(t,26)),assignee:'Eva',status:'not_started',notes:'',colorIndex:3,isMilestone:false,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Press Kit',startDate:fmtDate(addDays(t,22)),endDate:fmtDate(addDays(t,33)),assignee:'Bob',status:'not_started',notes:'',colorIndex:4,isMilestone:false,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Launch Event',startDate:fmtDate(addDays(t,36)),endDate:fmtDate(addDays(t,36)),assignee:null,status:'not_started',notes:'',colorIndex:5,isMilestone:true,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Post-Launch Review',startDate:fmtDate(addDays(t,37)),endDate:fmtDate(addDays(t,48)),assignee:'Carol',status:'not_started',notes:'',colorIndex:6,isMilestone:false,lastEditedBy:null,lastEditedAt:null}
-      ],dependencies:[]},
-      {id:uid(),name:'Office Renovation',color:'#36b37e',tasks:[
-        {id:uid(),name:'Site Survey',startDate:fmtDate(addDays(t,7)),endDate:fmtDate(addDays(t,11)),assignee:'David',status:'not_started',notes:'',colorIndex:0,isMilestone:false,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Design Plans',startDate:fmtDate(addDays(t,14)),endDate:fmtDate(addDays(t,32)),assignee:'Alice',status:'not_started',notes:'',colorIndex:1,isMilestone:false,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Permits & Approvals',startDate:fmtDate(addDays(t,35)),endDate:fmtDate(addDays(t,53)),assignee:'Bob',status:'not_started',notes:'',colorIndex:2,isMilestone:false,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Construction',startDate:fmtDate(addDays(t,56)),endDate:fmtDate(addDays(t,88)),assignee:'Eva',status:'not_started',notes:'',colorIndex:3,isMilestone:false,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Furniture & Fixtures',startDate:fmtDate(addDays(t,82)),endDate:fmtDate(addDays(t,95)),assignee:'Carol',status:'not_started',notes:'',colorIndex:4,isMilestone:false,lastEditedBy:null,lastEditedAt:null},
-        {id:uid(),name:'Move-In Day',startDate:fmtDate(addDays(t,98)),endDate:fmtDate(addDays(t,98)),assignee:null,status:'not_started',notes:'',colorIndex:5,isMilestone:true,lastEditedBy:null,lastEditedAt:null}
-      ],dependencies:[]}
-    ],
+    projects:[],
     activeProjectId:null,
-    activeUser:'Alice',
+    activeUser:DEFAULT_USERS[0].name,
     viewMode:'monthly',
     zoomLevel:1
   };
 }
 
-function addSampleDependencies(data){
-  data.projects.forEach(p=>{
-    if(p.tasks.length>=3){
-      p.dependencies.push({from:p.tasks[0].id,to:p.tasks[1].id});
-      p.dependencies.push({from:p.tasks[1].id,to:p.tasks[2].id});
-    }
-    if(p.tasks.length>=5){
-      p.dependencies.push({from:p.tasks[2].id,to:p.tasks[3].id});
-    }
-  });
-}
-
-// ─── State management ───────────────────────────────────────
-function applyLocalOrSample(){
-  let d = storageGet(SK.data);
-  if(!d || !d.projects || d.projects.length===0){
-    d = createSampleData();
-    addSampleDependencies(d);
-  }
-  if(!d.users || !Array.isArray(d.users) || d.users.length===0){
-    d.users=DEFAULT_USERS.map(u=>({name:u.name,color:u.color}));
-  }
-  if(!d.activeProjectId && d.projects.length>0) d.activeProjectId=d.projects[0].id;
-  d.activeUser = storageGet(SK.user) || d.activeUser || d.users[0].name;
-  d.viewMode = d.viewMode || 'monthly';
-  d.zoomLevel = d.zoomLevel || 1;
-  state = d;
-  saveLocalOnly();
-}
-
 async function loadState(){
   document.body.classList.add('storage-loading');
-  setGithubSyncIndicator('loading', 'Loading from Supabase…');
+  setSyncIndicator('loading', 'Loading from Supabase…');
   try{
-    const secret = getRemoteApiSecret();
-    if(secret){
-      try{
-        const data = await fetchRemoteState();
-        if(validateRemotePayload(data)){
-          state = {users:[],projects:[],activeProjectId:null,activeUser:null,viewMode:'monthly',zoomLevel:1};
-          mergeRemoteIntoState(data);
-          saveLocalOnly();
-          return;
-        }
-      }catch(e){
-        showToast('Could not load from Supabase — using local data.');
+    try{
+      const data = await fetchRemoteState();
+      if(validateRemotePayload(data)){
+        state = createEmptyState();
+        mergeRemoteIntoState(data);
+        return;
       }
+    }catch(e){
+      showToast('Could not load from Supabase — starting with empty board.');
     }
-    applyLocalOrSample();
+    state = createEmptyState();
   }finally{
-    setGithubSyncIndicator('hidden');
+    setSyncIndicator('hidden');
     document.body.classList.remove('storage-loading');
   }
 }
@@ -1544,15 +1457,11 @@ function setupEvents(){
   document.getElementById('btn-redo').addEventListener('click',redo);
 
   document.getElementById('btn-save-server').addEventListener('click',async()=>{
-    if(!getRemoteApiSecret()){
-      showToast('Connect via Export → Remote (Supabase)… first');
-      return;
-    }
     const btn=document.getElementById('btn-save-server');
     btn.disabled=true;
     try{
       const ok=await pushRemoteState();
-      if(ok){ storageSet(SK.data,state); storageSet(SK.user,state.activeUser); showToast('Saved to server'); }
+      if(ok){ showToast('Saved to server'); }
     }finally{ btn.disabled=false; }
   });
 
@@ -1633,10 +1542,6 @@ function setupEvents(){
   document.getElementById('btn-export-json').addEventListener('click',exportJSON);
   document.getElementById('btn-import-json').addEventListener('click',()=>{
     document.getElementById('json-file-input').click();
-  });
-  document.getElementById('btn-remote-sync').addEventListener('click',()=>{
-    closeAllDropdowns();
-    showRemoteSyncModal();
   });
   document.getElementById('json-file-input').addEventListener('change',importJSON);
 
@@ -1719,55 +1624,6 @@ function showInputModal(title,msg,defaultVal,btnText,onConfirm){
   inp.addEventListener('keydown',e=>{if(e.key==='Enter'){closeModal();onConfirm(inp.value)}});
   document.getElementById('mc-cancel').addEventListener('click',closeModal);
   document.getElementById('mc-confirm').addEventListener('click',()=>{closeModal();onConfirm(inp.value)});
-}
-
-function showRemoteSyncModal(){
-  const connected=!!getRemoteApiSecret();
-  showModal(`<h3>Remote storage (Supabase)</h3><p>Supabase credentials stay on Netlify only. Paste the same <strong>API secret</strong> as in Netlify (<code>GANTT_API_SECRET</code>) — stored in <strong>session storage</strong> until you close the tab. Each trusted editor enters it once per session.</p>${connected?'<p style="font-size:12px;color:var(--text-secondary)">Cloud sync: on (this tab)</p>':''}<input type="password" class="modal-input" id="modal-remote-secret" placeholder="API secret" autocomplete="off"><div id="modal-actions" style="flex-wrap:wrap;gap:8px"><button class="modal-cancel" id="mc-cancel">Close</button>${connected?'<button class="modal-danger" id="mc-disconnect">Disconnect</button>':''}<button class="modal-confirm" id="mc-load">Load from server</button><button class="modal-confirm" id="mc-save">Save to server now</button></div>`);
-  document.getElementById('mc-cancel').addEventListener('click',closeModal);
-  const disc=document.getElementById('mc-disconnect');
-  if(disc)disc.addEventListener('click',()=>{setRemoteApiSecret('');closeModal();showToast('Remote disconnected');updateRemoteMenuLabel();});
-  document.getElementById('mc-load').addEventListener('click',async ()=>{
-    const v=document.getElementById('modal-remote-secret').value.trim();
-    if(v)setRemoteApiSecret(v);
-    if(!getRemoteApiSecret()){showToast('Enter API secret');return}
-    closeModal();
-    try{
-      const data=await fetchRemoteState();
-      if(!validateRemotePayload(data)){showToast('Invalid remote data');return}
-      const emptyRemote=remoteSnapshotIsEmpty(data);
-      const msg=emptyRemote
-        ?'Server has no projects yet. Replace this browser\u2019s local data with an empty board?'
-        :'Load state from server? Unsaved local changes will be overwritten.';
-      showConfirmModal('Replace local data?',msg,'Load','confirm',()=>{
-        state={users:[],projects:[],activeProjectId:null,activeUser:null,viewMode:'monthly',zoomLevel:1};
-        mergeRemoteIntoState(data);
-        undoStack=[];redoStack=[];
-        saveLocalOnly();
-        updateRemoteMenuLabel();
-        scrollToTodayOnce=true;
-        render();
-        showToast('Loaded from server');
-      });
-    }catch(e){showToast('Load failed (check secret and Netlify)');}
-  });
-  document.getElementById('mc-save').addEventListener('click',async ()=>{
-    const v=document.getElementById('modal-remote-secret').value.trim();
-    if(v)setRemoteApiSecret(v);
-    if(!getRemoteApiSecret()){showToast('Enter API secret');return}
-    closeModal();
-    const ok=await pushRemoteState();
-    if(ok)showToast('Saved to server');
-    updateRemoteMenuLabel();
-  });
-}
-
-function updateRemoteMenuLabel(){
-  const el=document.getElementById('btn-remote-sync');
-  if(!el)return;
-  el.innerHTML=getRemoteApiSecret()
-    ?'<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><ellipse cx="7" cy="4" rx="3" ry="1.8"/><path d="M4 4v3c0 1.2 1.3 2.2 3 2.2s3-1 3-2.2V4"/><path d="M4 7v3c0 1.2 1.3 2.2 3 2.2"/></svg> Remote ●'
-    :'<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><ellipse cx="7" cy="4" rx="3" ry="1.8"/><path d="M4 4v3c0 1.2 1.3 2.2 3 2.2s3-1 3-2.2V4"/><path d="M4 7v3c0 1.2 1.3 2.2 3 2.2"/></svg> Remote (Supabase)…';
 }
 
 function showChoiceModal(title,msg,choices,onChoice){
@@ -1940,7 +1796,6 @@ function esc(s){
 async function init(){
   initTheme();
   await loadState();
-  updateRemoteMenuLabel();
   render();
   setupDrag();
   setupKeyboard();

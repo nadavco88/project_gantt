@@ -1,12 +1,10 @@
 // netlify/functions/load-gantt.js
 // GET /.netlify/functions/load-gantt
 // Queries Supabase tables and returns the assembled state blob.
-
-const crypto = require('crypto');
+// Publicly accessible — no auth required.
 
 const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const API_SECRET           = process.env.GANTT_API_SECRET;
 
 const SECURE_HEADERS = {
   'Content-Type': 'application/json',
@@ -16,20 +14,6 @@ const SECURE_HEADERS = {
   'Strict-Transport-Security': 'max-age=63072000; includeSubDomains',
   'Access-Control-Allow-Origin': '*',
 };
-
-function checkAuth(event) {
-  const authHeader = (event.headers['authorization'] || '').trim();
-  if (!authHeader.startsWith('Bearer ')) return false;
-  const provided = authHeader.slice(7);
-  try {
-    const a = Buffer.from(provided.padEnd(64));
-    const b = Buffer.from(API_SECRET.padEnd(64));
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
-  } catch {
-    return false;
-  }
-}
 
 async function supabaseGet(table, query = '') {
   const url = `${SUPABASE_URL}/rest/v1/${table}?${query}`;
@@ -54,7 +38,7 @@ exports.handler = async (event) => {
       headers: {
         ...SECURE_HEADERS,
         'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Headers': 'Content-Type',
       },
       body: '',
     };
@@ -62,10 +46,6 @@ exports.handler = async (event) => {
 
   if (event.httpMethod !== 'GET') {
     return { statusCode: 405, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Method Not Allowed' }) };
-  }
-
-  if (!checkAuth(event)) {
-    return { statusCode: 401, headers: SECURE_HEADERS, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
